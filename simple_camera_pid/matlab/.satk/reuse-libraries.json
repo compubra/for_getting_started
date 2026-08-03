@@ -1,0 +1,4 @@
+{
+  "confirmedNone": true,
+  "note": "User confirmed there are no custom reusable Simulink libraries. MuJoCo/Gazebo platform libraries are treated as installed platform dependencies."
+}

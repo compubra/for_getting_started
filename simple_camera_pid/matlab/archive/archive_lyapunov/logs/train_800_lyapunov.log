@@ -1,0 +1,6 @@
+fprintf('=== 800-ep Lyapunov training, random maps, no early stop ===\n');
+[trainedAgent, trainInfo, cfg] = run_sac_training( ...
+    "ModelName", "visual_line_follower_sac_lyapunov", ...
+    "MaxEpisodes", 800);
+feature('HotLinks',0);rehash;  % pick up edited trainer
+diary(fullfile(pwd,'simulation_data','sac_training','train_800_lyapunov.log'));

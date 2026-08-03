@@ -1,0 +1,61 @@
+# ---------------------------------------------------------------------------
+# 只跟踪代码：源码、launch、config、包元数据、MATLAB/Simulink 模型源文件。
+# 仿真数据、训练产物、编译缓存、rosbag、IDE 索引一律不入库（合计 ~20 GB，全部可再生）。
+# ---------------------------------------------------------------------------
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# --- IDE / 编辑器缓存 ---
+.vscode/
+*.vc.db
+*.vc.db-shm
+*.vc.db-wal
+
+# --- 仿真 / 实验数据（16 GB）---
+simple_camera_pid/matlab/simulation_data/
+simple_camera_pid/bags/
+
+# --- MATLAB / Simulink 构建缓存与自动保存 ---
+simple_camera_pid/matlab/lf_cache/
+simple_camera_pid/matlab/lf_codegen/
+simple_camera_pid/matlab/slprj/
+simple_camera_pid/matlab/MUJOCO_LOG.TXT
+*.slxc
+*.slx.autosave
+*.slx.original
+*.asv
+*.mex*
+
+# --- 归档的 RL agent 快照（372 MB 的 .mat）---
+# archive_lyapunov 下的 code/ models/ logs/ 仍然入库，只排除 agents/
+simple_camera_pid/matlab/archive/archive_lyapunov/agents/
+
+# --- HPC 训练产物：保留 lsac/ 代码和 *.sbatch，排除 checkpoint 与日志 ---
+simple_camera_pid/hpc/*/simulation_data/
+simple_camera_pid/hpc/sac_residual_training/
+simple_camera_pid/hpc/ppo_residual_training/
+*.out
+*.err
+
+# --- 训练权重 / 编译模型 ---
+*.zip
+*.pth
+*.onnx
+*.bin
+*.mat
+
+# --- 误入本仓库的无关 LLM-RL 框架（见 simple_camera_pid/README.md）---
+# 它自带 .git，不排除的话会被当成子模块引用（gitlink）加进来
+simple_camera_pid/simple_camera_pid/training/pipo_verl/
+
+# --- 指向仓库外资产树的符号链接（model/ 在 src/ 之外，无法随本仓库分发）---
+simple_camera_pid/model
+
+# --- 第三方专有代码：Horizon Robotics 模型转换 SDK，文件头声明
+#     "confidential and contains trade secrets"，禁止转载/传播，不能进公开仓库 ---
+seldom/

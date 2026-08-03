@@ -1,0 +1,147 @@
+# Real-hardware parameters. Covers three deployment shapes that all share the
+# same vision/camera/PID tuning:
+#   - gazebo_line_follower_node: single-node, vision+PID in one process
+#     (see launch/real/real_line_follower.launch.py). Run this on whichever
+#     machine has the camera topic reachable -- it's network-agnostic.
+#   - line_follower_vision_node + line_follower_control_node: the split
+#     architecture (vision_node on the Pi next to the camera,
+#     control_node on the PC) -- see simple_camera_pid/real/vision_node.py's
+#     module docstring for why you'd want this split.
+# The /**: section below applies to ANY node name, so both shapes read the
+# same camera/vision tuning from one place -- edit it once, not per-node.
+
+/**:
+  ros__parameters:
+    # --- Real camera geometry -- image_width/image_height/camera_pitch_deg
+    # are CONFIRMED: image_width/image_height was 800x600 (measured from
+    # ~/camera_test_frame.png on the Pi) until 2026-08-03, when the real
+    # camera's driver was reconfigured to 640x480 to match MuJoCo/Gazebo (see
+    # common/camera_geometry.py's turtlebot3_burger_gazebo_camera()
+    # docstring) -- re-verify against a fresh capture if this drifts again.
+    # camera_pitch_deg confirmed 2026-08-03 directly against the real robot
+    # -- the camera IS mounted at 15 deg down-pitch (matching
+    # hpc/*/lsac/vision.py's CAM_PITCH_DEG, which turned out to already be
+    # correct -- it was this yaml's placeholder 0.0 that was wrong, not that
+    # file). camera_fovy_deg/camera_mount_height are still UNCONFIRMED as
+    # real measurements -- they're copied from turtlebot3_burger_gazebo_camera(),
+    # so these may already be the real numbers rather than sim placeholders,
+    # but there's no separate calibration record on the Pi to confirm that --
+    # verify before trusting (checkerboard calibration or datasheet + a tape
+    # measure). See turtlebot3_burger_real_camera()'s docstring in
+    # simple_camera_pid/common/camera_geometry.py for how to get each value.
+    #
+    # IMPORTANT: every real-robot vision test run earlier in this session
+    # (the heading-rotation and lateral-shift sign-convention checks) used
+    # the WRONG pitch_deg=0.0 AND the since-superseded 800x600 resolution --
+    # their found/sign conclusions still hold (those only depended on which
+    # side the line was on, not exact geometry), but the numeric
+    # lateral_error/heading_error magnitudes from those runs don't apply
+    # anymore and shouldn't be reused as reference values.
+    camera_profile: real
+    image_width: 640     # CONFIRMED 2026-08-03: real camera driver reconfigured to this
+    image_height: 480    # CONFIRMED 2026-08-03: real camera driver reconfigured to this
+    camera_fovy_deg: 45.9857     # UNCONFIRMED as a real measurement -- see note above
+    camera_mount_height: 0.133   # UNCONFIRMED as a real measurement -- see note above
+    camera_pitch_deg: 15.0       # CONFIRMED 2026-08-03 against the real robot
+
+    # Vision thresholds -- min_brightness/max_saturation are the most likely
+    # to need retuning for real ambient lighting (indoor fluorescent/LED vs.
+    # Gazebo's rendered lighting model). roi_bottom_fraction/lookahead_distance
+    # started as the Gazebo values; re-measure found-rate on your real track
+    # before trusting them (see common/vision.py's roi_widen_step docstring
+    # for how this project debugged the same problem in sim).
+    roi_bottom_fraction: 0.3
+    num_points: 30
+    lookahead_distance: 0.20
+    lateral_gain: 0.6
+    heading_gain: 0.35
+    curvature_gain: 0.04
+    min_brightness: 70.0
+    max_saturation: 0.30
+    min_pixels: 30.0
+    error_scale: 500.0
+    roi_widen_step: 0.2
+    roi_widen_max: 0.7
+
+    # TurtleBot3 Burger kinematics -- physical constants, same on every Burger.
+    wheel_radius: 0.033
+    wheel_separation: 0.160
+    max_wheel_speed: 20.0
+
+    # Start with the Gazebo-tuned gains; expect to retune kp/kd once you see
+    # real-camera noise characteristics -- real frames are noisier than a
+    # rendered mask, and real-world lighting will need re-tuning of
+    # min_brightness/max_saturation above.
+    kp: 5.0
+    ki: 0.0
+    kd: 0.35
+    n_filter: 20.0
+
+    # base_linear_speed/base_speed_scale/max_angular_speed were NOT exposed
+    # as parameters at all until 2026-07-31 -- any value written here before
+    # that silently did nothing, and the node always ran ControllerConfig's
+    # Gazebo-tuned dataclass defaults (base_linear_speed=20, base_speed_scale
+    # =0.03, max_angular_speed=1.5) no matter what. Confirmed on real
+    # hardware: those defaults commanded 0.343 m/s linear (TurtleBot3
+    # Burger's own rated max is ~0.22 m/s) with angular.z pinned at the 1.5
+    # saturation ceiling. base_speed_scale dropped 10x below to cap linear
+    # speed at found=true/straight-line around 0.06 m/s (base_linear_speed
+    # * base_speed_scale, matching ~/line_follower_ws's own from-scratch
+    # node's linear_speed default on this same robot) -- still just a
+    # starting point, re-tune from an actual run's data like everything else
+    # here, not a validated final value.
+    base_linear_speed: 20.0
+    base_speed_scale: 0.003
+    max_angular_speed: 1.0
+
+    # This project's real TurtleBot3's turtlebot3_node subscribes to
+    # TwistStamped, not plain Twist (Gazebo's ros_gz_bridge wants plain
+    # Twist instead -- see cmd_vel_stamped's comment in
+    # gazebo_line_follower_node.py/control_node.py). Confirmed 2026-07-31:
+    # publishing plain Twist against this robot silently never reached
+    # turtlebot3_node at all (different msg type on the same topic name, no
+    # error, robot just never moved).
+    cmd_vel_stamped: true
+
+    # Pure PID baseline for the first real run -- no sim-trained residual
+    # policy loaded. Only turn this on after the PID-only baseline is
+    # verified to track the line reliably.
+    residual_model_path: ""
+    residual_algo: sac
+    residual_max_delta_omega: 1.0
+    residual_max_delta_v: 1.0
+    residual_use_wheel_speed_obs: false
+    residual_use_2d_action: false
+
+# --- Single-node deployment (gazebo_line_follower_node, real_line_follower.launch.py) ---
+gazebo_line_follower_node:
+  ros__parameters:
+    # Matches ~/camera_ros_ws on the Pi (christianrauch/camera_ros wrapping
+    # libcamera): its launch file remaps image_view's viewer to
+    # /camera/image_raw, implying that's CameraNode's own default output
+    # topic. Re-verify once the Pi is actually running:
+    #   ros2 topic list | grep -i image
+    #   ros2 topic hz <topic>
+    #   ros2 topic echo <topic> --field encoding   # must be rgb8/bgr8/rgba8/bgra8
+    image_topic: /camera/image_raw
+    cmd_vel_topic: /cmd_vel
+    diagnostic_topic: /gazebo_line_follower/debug
+
+# --- Split deployment: vision_node runs on the Pi (next to the camera) ---
+line_follower_vision_node:
+  ros__parameters:
+    image_topic: /camera/image_raw    # see the note under gazebo_line_follower_node above
+    local_path_topic: /line_follower/local_path
+
+# --- Split deployment: control_node runs on the PC ---
+line_follower_control_node:
+  ros__parameters:
+    local_path_topic: /line_follower/local_path
+    cmd_vel_topic: /cmd_vel
+    diagnostic_topic: /line_follower/debug
+    # If no local_path message arrives within this many seconds, treat the
+    # input as lost (found=False) instead of replaying a stale command --
+    # see control_node.py's module docstring. 1.0s matches the
+    # watchdog_timeout convention already used by ~/line_follower_ws's own
+    # from-scratch node on the Pi.
+    watchdog_timeout: 1.0

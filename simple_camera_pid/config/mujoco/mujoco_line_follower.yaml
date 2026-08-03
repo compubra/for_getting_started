@@ -1,0 +1,72 @@
+mujoco_line_follower_node:
+  ros__parameters:
+    # repo_root is deliberately NOT set here: the node computes a working
+    # default (source checkout / colcon symlink-install) on its own, and the
+    # launch file's repo_root argument overrides it when needed. Setting an
+    # empty string here would win over both and break the default.
+
+    map_key: simple
+
+    # On-screen MuJoCo viewer window (whole track + car). Off by default
+    # since it requires a display; the onboard-camera feed always publishes
+    # to image_topic regardless of this setting.
+    use_viewer: false
+
+    # TurtleBot3 Burger kinematics, read from the visual_line_follower_with_debug.slx
+    # model workspace.
+    wheel_radius: 0.033
+    wheel_separation: 0.160
+    max_wheel_speed: 20.0
+
+    # LinePID gains (Kp_Line, Ki_Line, Kd_Line, N_Line in the model workspace).
+    kp: 5.0
+    ki: 0.0
+    kd: 0.35
+    n_filter: 20.0
+
+    # Camera-local path generator (LocalPath_* in the model workspace). ROI/
+    # lookahead match the post-2026-07-22 defaults (MuJoCo camera flattened to
+    # level, raising the near-visible-ground-distance floor to ~0.31m -- the
+    # old 0.50/0.20 pair predates that and is no longer geometrically valid).
+    roi_bottom_fraction: 0.30
+    lookahead_distance: 0.40
+    lateral_gain: 0.6
+    heading_gain: 0.35
+    curvature_gain: 0.04
+    # Adaptive-ROI fallback (2026-07-29, see LineFollowerVision.roi_widen_step
+    # in common/vision.py and config/gazebo/gazebo_line_follower.yaml for the
+    # full writeup -- this camera's roi_bottom_fraction/lookahead_distance
+    # pair already brackets its near-field range well, measured found_rate
+    # 100% on ellipse, so this should rarely/never trigger here; kept at the
+    # same default as Gazebo for consistency rather than disabled).
+    roi_widen_step: 0.2
+    roi_widen_max: 0.7
+
+    image_topic: /camera/image_raw
+    odom_topic: /odom
+    cmd_vel_topic: /cmd_vel
+    diagnostic_topic: /mujoco_line_follower/debug
+    odom_frame_id: odom
+    base_frame_id: base_link
+    camera_frame_id: camera_link
+
+    # Optional inference-only SAC/PPO residual policy (see
+    # simple_camera_pid.common.residual_policy for the full checkpoint-
+    # generation table). Empty path = pure PID baseline. These are the safe
+    # ros2-run-without-launch-file fallback values (1-D action, no
+    # wheel-speed obs); mujoco_line_follower.launch.py's own argument
+    # defaults are what actually get used for `ros2 launch`.
+    residual_model_path: ""
+    residual_algo: sac
+    residual_max_delta_omega: 1.0
+    residual_max_delta_v: 1.0  # only used if residual_use_2d_action
+    # False: 5-D obs, matches simple_camera_pid.training (in-repo
+    # SAC/PPO). True: adds normalized wheel-speed feedback, matching the
+    # HPC/lsac-based train_sac_residual.py/train_ppo_residual.py at the
+    # package root.
+    residual_use_wheel_speed_obs: false
+    # False: 1-D action (delta_omega only). True: 2-D action
+    # [delta_v, delta_omega], matching hpc/0721+/hpc/0724's residual model
+    # (post-2026-07-21 Diff_Drive_Kinematics refactor) -- requires
+    # residual_use_wheel_speed_obs: true too.
+    residual_use_2d_action: false

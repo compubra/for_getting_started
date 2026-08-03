@@ -1,0 +1,91 @@
+[startup] SATK will initialize in background (~20s)...
+
+Simulink Agentic Toolkit - Installation Check
+===============================================
+
+Prerequisites
+  ? MATLAB 26.1.0.3251617 (R2026a) Update 2
+  ? Simulink installed and licensed
+
+MATLAB Environment
+  ? All 7 tool entry points on path
+  ? Package resolution correct (+sage, +mbd inside SATK)
+
+MCP Server
+  ? matlab-mcp-server.exe found: C:\Users\HP\.matlab\agentic-toolkits\bin\matlab-mcp-server.exe
+
+MCP Connectivity
+  ? shareMATLABSession available (MATLAB-side MCP components installed)
+  ? MATLAB connector running (port 31519)
+
+===============================================
+Result: PASS
+
+[startup] SATK initialized - MATLAB session shared for MCP.
+Set visual_line_follower_ppo_residual MuJoCo scene to D:\final_project\Sheffield\for_getting_started\src\simple_camera_pid\matlab\..\..\..\model\mujoco\turtlebot3\track_hard_turtlebot3_waffle_visual_scene.xml (in memory; not saved)
+Reward weights written to model workspace:
+    RewardQ    RewardR    RewardPLost    DoneSteps
+    _______    _______    ___________    _________
+
+       1         0.1          10            100   
+
+Domain randomization enabled:
+   1
+
+Active TurtleBot3 map: Track Hard (S-bends + hairpin) (track_hard)
+[Warning: 'Output Port 5' of block 'visual_line_follower_ppo_residual/OriginBot_Line_Follower' is not connected.] 
+[> In Simulink.Simulation.internal.DesktopSimHelper
+In Simulink.Simulation.internal.DesktopSimHelper.sim
+In Simulink/SimulationInput/sim
+In rl.env.internal.SimulinkSimulator>localSim (line 260)
+In rl.env.internal.SimulinkSimulator>@(in)localSim(in,simPkg) (line 169)
+In MultiSim.internal.runSingleSim
+In MultiSim.internal/SimulationRunnerSerial/executeImplSingle
+In MultiSim.internal/SimulationRunnerSerial/executeImpl
+In Simulink/SimulationManager/executeSims
+In Simulink/SimulationManagerEngine/executeSims
+In rl.env.internal/SimulinkSimulator/simInternal_ (line 170)
+In rl.env.internal/SimulinkSimulator/sim_ (line 76)
+In rl.env.internal/AbstractSimulator/sim (line 30)
+In rl.env.AbstractEnv/runEpisode (line 144)
+In rl.internal.train/EpisodeRunner/runEpisode_ (line 173)
+In rl.internal.train/EpisodeRunner/syncsim_series (line 51)
+In rl.internal.train/PPOTrainer/run_internal_batch_learner_ (line 734)
+In rl.internal.train/PPOTrainer/run_ (line 61)
+In rl.internal.train/Trainer/run (line 8)
+In rl.internal.trainmgr/OnlineTrainingManager/run_ (line 158)
+In rl.internal.trainmgr/TrainingManager/run (line 4)
+In rl.agent/AbstractAgent/internalTrain (line 201)
+In rl.agent.AbstractAgent/train (line 67)
+In train_ppo_residual_live (line 157)] 
+[Warning: The OperatingPointCompliance setting of the C Level-2 S-Function (mj_sfun) block 'visual_line_follower_ppo_residual/MuJoCo_Plant/S-Function' is not specified.
+Simulink therefore assumes that the default simulation operating point save/restore is sufficient to capture the complete simulation operating point of this block.
+Please specify the OperatingPointCompliance setting in the S-function source code. Alternatively, you can  <a
+href="matlab:warning('off','Simulink:blocks:AssumingDefaultSimStateForSFcn')">disable</a> this warning.] 
+[> In Simulink.Simulation.internal.DesktopSimHelper
+In Simulink.Simulation.internal.DesktopSimHelper.sim
+In Simulink/SimulationInput/sim
+In rl.env.internal.SimulinkSimulator>localSim (line 260)
+In rl.env.internal.SimulinkSimulator>@(in)localSim(in,simPkg) (line 169)
+In MultiSim.internal.runSingleSim
+In MultiSim.internal/SimulationRunnerSerial/executeImplSingle
+In MultiSim.internal/SimulationRunnerSerial/executeImpl
+In Simulink/SimulationManager/executeSims
+In Simulink/SimulationManagerEngine/executeSims
+In rl.env.internal/SimulinkSimulator/simInternal_ (line 170)
+In rl.env.internal/SimulinkSimulator/sim_ (line 76)
+In rl.env.internal/AbstractSimulator/sim (line 30)
+In rl.env.AbstractEnv/runEpisode (line 144)
+In rl.internal.train/EpisodeRunner/runEpisode_ (line 173)
+In rl.internal.train/EpisodeRunner/syncsim_series (line 51)
+In rl.internal.train/PPOTrainer/run_internal_batch_learner_ (line 734)
+In rl.internal.train/PPOTrainer/run_ (line 61)
+In rl.internal.train/Trainer/run (line 8)
+In rl.internal.trainmgr/OnlineTrainingManager/run_ (line 158)
+In rl.internal.trainmgr/TrainingManager/run (line 4)
+In rl.agent/AbstractAgent/internalTrain (line 201)
+In rl.agent.AbstractAgent/train (line 67)
+In train_ppo_residual_live (line 157)] 
+Episode:   1/800 | Episode reward:   -19.31 | Episode steps:  200 | Average reward:   -19.31 | Step Count:  200 | Episode Q0:     0.00
+Episode:   2/800 | Episode reward:   -20.28 | Episode steps:  200 | Average reward:   -19.79 | Step Count:  400 | Episode Q0:    -0.02
+ERROR: MATLAB error Exit Status: 0x00000001

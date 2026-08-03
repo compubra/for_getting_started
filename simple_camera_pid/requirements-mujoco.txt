@@ -1,0 +1,11 @@
+# pip dependencies for simple_camera_pid/mujoco/ and mujoco_line_follower_node.py.
+# Not resolvable via rosdep/apt; install into the same Python environment ROS2 uses:
+#   pip install -r requirements-mujoco.txt
+numpy>=1.24
+scipy>=1.10
+opencv-python>=4.6
+scikit-image>=0.21
+mujoco>=3.1
+gymnasium>=0.29
+stable-baselines3>=2.2
+matplotlib>=3.6

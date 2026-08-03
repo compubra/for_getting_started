@@ -1,0 +1,363 @@
+#!/usr/bin/env python3
+"""ROS2 node: SAC/PPO-residual (or plain-PID) TurtleBot3 line follower for Gazebo.
+
+Runs the same controller family as mujoco_line_follower_node.py
+(``common.control.line_follower_controller.LineFollowerController``, and the
+same residual-model observation spec via ``residual_use_wheel_speed_obs``),
+and the same vision algorithm too: ``common.vision.LineFollowerVision``
+(Hough-seed + sliding-window + ground-quadratic-fit -- the algorithm shared
+by both platforms since MATLAB's 2026-07-22 vision unification, see
+``common/vision.py``'s module docstring), applied to real Gazebo camera
+frames instead of an internally-rendered MuJoCo frame, using the Gazebo
+camera's own geometry (640x480, horizontal FOV, via
+``turtlebot3_burger_gazebo_camera()``). Drives the robot for real via
+``/cmd_vel`` instead of stepping an internal physics env.
+
+The stock Gazebo camera publishes at 30 Hz, but ``LineFollowerController``'s
+``FilteredPID`` bakes a fixed ``Ts_Control`` (20 Hz) into its derivative/
+integrator terms at construction (it takes no per-call dt) -- exactly like
+mujoco_line_follower_node.py's timer-driven loop. So this node does the same:
+the image callback only updates a "latest frame" buffer, and a separate fixed
+20 Hz timer runs the vision->control step on whatever frame is latest
+(sample-and-hold), keeping the control loop's dynamics correctly calibrated
+regardless of the camera's actual publish rate.
+
+Usage
+-----
+    ros2 launch simple_camera_pid track_bringup.launch.py map:=track_hard controller:=false
+    ros2 launch simple_camera_pid gazebo_line_follower.launch.py
+    ros2 launch simple_camera_pid gazebo_line_follower.launch.py \\
+        residual_model_path:=/path/to/sac_agent.zip residual_algo:=sac \\
+        residual_use_wheel_speed_obs:=true residual_use_2d_action:=true
+"""
+from __future__ import annotations
+
+from typing import Optional, Sequence, Tuple
+
+import numpy as np
+import rclpy
+from geometry_msgs.msg import Twist, TwistStamped, Vector3
+from rclpy.node import Node
+from sensor_msgs.msg import Image
+from std_msgs.msg import Float32MultiArray
+
+from simple_camera_pid.common.config import ControllerConfig, CurveSpeedGovernorConfig, RobotConfig
+from simple_camera_pid.common.control.line_follower_controller import LineFollowerController
+from simple_camera_pid.common.residual_policy import (
+    load_residual_model, residual_observation, residual_spaces,
+)
+from simple_camera_pid.common.camera_geometry import (
+    turtlebot3_burger_gazebo_camera, turtlebot3_burger_real_camera,
+)
+from simple_camera_pid.common.vision import LineFollowerVision
+
+
+def _image_msg_to_rgb(msg: Image) -> Optional[np.ndarray]:
+    """Decode a sensor_msgs/Image into an (H, W, 3) uint8 RGB array."""
+    encoding = msg.encoding.lower()
+    height, width, step = int(msg.height), int(msg.width), int(msg.step)
+    if height <= 0 or width <= 0 or step <= 0:
+        return None
+    raw = np.frombuffer(msg.data, dtype=np.uint8)
+    try:
+        rows = raw.reshape((height, step))
+    except ValueError:
+        return None
+
+    if encoding in ('rgb8', 'bgr8'):
+        channels = rows[:, :width * 3].reshape((height, width, 3))
+        if encoding == 'bgr8':
+            channels = channels[:, :, ::-1]
+        return np.ascontiguousarray(channels)
+    if encoding in ('rgba8', 'bgra8'):
+        channels = rows[:, :width * 4].reshape((height, width, 4))[:, :, :3]
+        if encoding == 'bgra8':
+            channels = channels[:, :, ::-1]
+        return np.ascontiguousarray(channels)
+    return None
+
+
+class GazeboLineFollowerNode(Node):
+    def __init__(self) -> None:
+        super().__init__("gazebo_line_follower_node")
+        self._declare_parameters()
+
+        self.robot = RobotConfig(
+            wheel_radius=self.get_parameter("wheel_radius").value,
+            wheel_separation=self.get_parameter("wheel_separation").value,
+            max_wheel_speed=self.get_parameter("max_wheel_speed").value,
+        )
+        controller_cfg = ControllerConfig(
+            kp=self.get_parameter("kp").value,
+            ki=self.get_parameter("ki").value,
+            kd=self.get_parameter("kd").value,
+            n_filter=self.get_parameter("n_filter").value,
+            steering_sign=self.get_parameter("steering_sign").value,
+            base_linear_speed=self.get_parameter("base_linear_speed").value,
+            base_speed_scale=self.get_parameter("base_speed_scale").value,
+            max_angular_speed=self.get_parameter("max_angular_speed").value,
+        )
+        self.controller = LineFollowerController(self.robot, controller_cfg, CurveSpeedGovernorConfig())
+        self.controller.reset()
+
+        # Same vision algorithm as the MuJoCo side. camera_profile selects the
+        # geometry: "gazebo" (default) uses the sim camera's own fixed
+        # 640x480 (see turtlebot3_burger_gazebo_camera()'s docstring);
+        # "real" builds it from the camera_fovy_deg/camera_mount_height/
+        # camera_pitch_deg/image_width/image_height parameters below, for a
+        # real robot's actual camera (see turtlebot3_burger_real_camera()'s
+        # docstring in common/camera_geometry.py).
+        # roi_bottom_fraction=0.3 (not MATLAB's Gazebo default of 0.10) plus
+        # roi_widen_step/roi_widen_max below are jointly the 2026-07-29 fix
+        # for this camera's found-rate problem -- see LineFollowerVision's
+        # roi_widen_step docstring for the measured before/after numbers
+        # (16.5% -> ~97% found on the ellipse map, track_hard's already-good
+        # rate untouched). A single static roi_bottom_fraction could not
+        # serve both gentle- and sharp-curve maps at once; the narrow/wide
+        # two-attempt retry can.
+        # flip_vertical=False: ROS Image messages (and Gazebo's camera
+        # plugin) are conventional top-row-first, same reasoning as
+        # sim/turtlebot3_mujoco_env.py's use of this class.
+        camera_profile = self.get_parameter("camera_profile").value
+        if camera_profile == "real":
+            # Real camera: geometry has to come from an actual measurement of
+            # this robot's camera, not a simulator default -- see
+            # turtlebot3_burger_real_camera()'s docstring for how to get
+            # these four numbers.
+            image_width = int(self.get_parameter("image_width").value)
+            image_height = int(self.get_parameter("image_height").value)
+            camera_params = turtlebot3_burger_real_camera(
+                image_width=image_width,
+                image_height=image_height,
+                fovy_deg=self.get_parameter("camera_fovy_deg").value,
+                mount_height=self.get_parameter("camera_mount_height").value,
+                pitch_deg=self.get_parameter("camera_pitch_deg").value,
+            )
+        elif camera_profile == "gazebo":
+            camera_params = turtlebot3_burger_gazebo_camera()
+            image_width, image_height = camera_params.image_width, camera_params.image_height
+        else:
+            raise ValueError(f"unknown camera_profile: {camera_profile!r} (expected 'gazebo' or 'real')")
+
+        self.vision = LineFollowerVision(
+            roi_bottom_fraction=self.get_parameter("roi_bottom_fraction").value,
+            waypoint_count=self.get_parameter("num_points").value,
+            lookahead_distance=self.get_parameter("lookahead_distance").value,
+            lateral_gain=self.get_parameter("lateral_gain").value,
+            heading_gain=self.get_parameter("heading_gain").value,
+            curvature_gain=self.get_parameter("curvature_gain").value,
+            min_brightness=self.get_parameter("min_brightness").value,
+            max_saturation=self.get_parameter("max_saturation").value,
+            min_pixels=self.get_parameter("min_pixels").value,
+            error_scale=self.get_parameter("error_scale").value,
+            roi_widen_step=self.get_parameter("roi_widen_step").value,
+            roi_widen_max=self.get_parameter("roi_widen_max").value,
+            image_height=image_height,
+            image_width=image_width,
+            camera=camera_params,
+            flip_vertical=False,
+        )
+
+        self._residual_model = None
+        self._residual_max_delta_omega = float(self.get_parameter("residual_max_delta_omega").value)
+        self._residual_max_delta_v = float(self.get_parameter("residual_max_delta_v").value)
+        self._residual_use_wheel_speed_obs = bool(
+            self.get_parameter("residual_use_wheel_speed_obs").value
+        )
+        self._residual_use_2d_action = bool(self.get_parameter("residual_use_2d_action").value)
+        self._prev_delta_v = 0.0
+        self._prev_delta_omega = 0.0
+        self._prev_wheel_command = (0.0, 0.0)
+        residual_path = self.get_parameter("residual_model_path").value
+        if residual_path:
+            obs_space, action_space = residual_spaces(
+                self._residual_use_wheel_speed_obs, self._residual_use_2d_action,
+                self._residual_max_delta_v, self._residual_max_delta_omega,
+            )
+            self._residual_model = load_residual_model(
+                residual_path, self.get_parameter("residual_algo").value, obs_space, action_space,
+            )
+
+        self._last_vision = None  # LocalPathResult, updated by _image_callback
+
+        # cmd_vel_stamped: Gazebo's ros_gz_bridge expects plain Twist (see
+        # config/gazebo/ros_gz_bridge_turtlebot3.yaml), but this project's
+        # real TurtleBot3's turtlebot3_node subscribes to TwistStamped (a
+        # newer turtlebot3_node/ros2_control convention) -- publishing plain
+        # Twist against it is not an error, it just silently never connects
+        # (different message type on the same topic name), so the robot
+        # never moves. config/real/real_line_follower.yaml sets this true.
+        self._cmd_vel_stamped = bool(self.get_parameter("cmd_vel_stamped").value)
+        cmd_vel_type = TwistStamped if self._cmd_vel_stamped else Twist
+        self.cmd_pub = self.create_publisher(cmd_vel_type, self.get_parameter("cmd_vel_topic").value, 10)
+        self.diag_pub = self.create_publisher(
+            Float32MultiArray, self.get_parameter("diagnostic_topic").value, 10
+        )
+        self.create_subscription(
+            Image, self.get_parameter("image_topic").value, self._image_callback, 10
+        )
+
+        ts_control = controller_cfg.ts_control
+        self.timer = self.create_timer(ts_control, self._on_timer)
+        self.get_logger().info(
+            f"Gazebo line follower started: residual={'on' if self._residual_model else 'off'}, "
+            f"control rate={1.0 / ts_control:.1f} Hz (camera may publish at a different rate)"
+        )
+
+    def _declare_parameters(self) -> None:
+        self.declare_parameter("image_topic", "/camera/image_raw")
+        self.declare_parameter("cmd_vel_topic", "/cmd_vel")
+        self.declare_parameter("diagnostic_topic", "/gazebo_line_follower/debug")
+        # False (default): plain Twist, matches Gazebo's ros_gz_bridge. True:
+        # TwistStamped, matches this project's real TurtleBot3's
+        # turtlebot3_node -- see the cmd_vel_stamped comment in __init__.
+        self.declare_parameter("cmd_vel_stamped", False)
+        self.declare_parameter("wheel_radius", RobotConfig.wheel_radius)
+        self.declare_parameter("wheel_separation", RobotConfig.wheel_separation)
+        self.declare_parameter("max_wheel_speed", RobotConfig.max_wheel_speed)
+        self.declare_parameter("kp", ControllerConfig.kp)
+        self.declare_parameter("ki", ControllerConfig.ki)
+        self.declare_parameter("kd", ControllerConfig.kd)
+        self.declare_parameter("n_filter", ControllerConfig.n_filter)
+        self.declare_parameter("steering_sign", ControllerConfig.steering_sign)
+        # These three set the actual commanded speed magnitude -- previously
+        # NOT exposed as parameters at all (silently used ControllerConfig's
+        # Gazebo-tuned dataclass defaults regardless of any yaml config file,
+        # a real gap found 2026-07-31: a real robot commanded 0.343 m/s
+        # linear / saturated 1.5 rad/s angular off these untouched defaults,
+        # well above TurtleBot3 Burger's rated ~0.22 m/s). Tune these down
+        # for real hardware -- see real_line_follower.yaml.
+        self.declare_parameter("base_linear_speed", ControllerConfig.base_linear_speed)
+        self.declare_parameter("base_speed_scale", ControllerConfig.base_speed_scale)
+        self.declare_parameter("max_angular_speed", ControllerConfig.max_angular_speed)
+        # Camera geometry: "gazebo" (default, 640x480 sim camera) or "real"
+        # (a real robot's own camera -- see turtlebot3_burger_real_camera()'s
+        # docstring in common/camera_geometry.py for how to fill in the
+        # camera_fovy_deg/camera_mount_height/camera_pitch_deg below from an
+        # actual measurement of this robot). image_width/image_height/
+        # camera_fovy_deg below are only read (and only matter) when
+        # camera_profile is "real" -- their defaults are just a starting
+        # placeholder, not tied to the "gazebo" profile's own fixed 640x480
+        # (which always comes from turtlebot3_burger_gazebo_camera()
+        # regardless of these three parameters).
+        self.declare_parameter("camera_profile", "gazebo")
+        self.declare_parameter("image_width", 640)
+        self.declare_parameter("image_height", 480)
+        self.declare_parameter("camera_fovy_deg", 45.9857)
+        self.declare_parameter("camera_mount_height", 0.133)
+        self.declare_parameter("camera_pitch_deg", 15.0)
+        self.declare_parameter("roi_bottom_fraction", 0.3)
+        self.declare_parameter("num_points", 30)
+        self.declare_parameter("lookahead_distance", 0.20)
+        self.declare_parameter("lateral_gain", 0.6)
+        self.declare_parameter("heading_gain", 0.35)
+        self.declare_parameter("curvature_gain", 0.04)
+        self.declare_parameter("min_brightness", 70.0)
+        self.declare_parameter("max_saturation", 0.30)
+        self.declare_parameter("min_pixels", 30.0)
+        self.declare_parameter("error_scale", 500.0)
+        # Adaptive-ROI fallback (see LineFollowerVision.roi_widen_step's
+        # docstring): if roi_bottom_fraction finds nothing this frame, retry
+        # once with the ROI widened by this much (0.0 = disabled, restores
+        # the old single-attempt behavior).
+        self.declare_parameter("roi_widen_step", 0.2)
+        self.declare_parameter("roi_widen_max", 0.7)
+        # Optional inference-only SAC/PPO residual policy (see
+        # simple_camera_pid.common.residual_policy and
+        # mujoco_line_follower_node.py, which shares the same spec). Empty
+        # path = pure PID baseline.
+        self.declare_parameter("residual_model_path", "")
+        self.declare_parameter("residual_algo", "sac")  # "sac" | "ppo"
+        self.declare_parameter("residual_max_delta_omega", 1.0)
+        self.declare_parameter("residual_max_delta_v", 1.0)  # only used if residual_use_2d_action
+        self.declare_parameter("residual_use_wheel_speed_obs", False)
+        self.declare_parameter("residual_use_2d_action", False)
+
+    def _image_callback(self, msg: Image) -> None:
+        rgb = _image_msg_to_rgb(msg)
+        if rgb is None:
+            return
+        self._last_vision = self.vision.step(rgb)
+
+    def _residual_action(self) -> Tuple[float, float]:
+        """Returns ``(delta_v, delta_omega)``; ``delta_v`` is 0.0 whenever no
+        model is loaded or the loaded model is a 1-D-action checkpoint."""
+        if self._residual_model is None or self._last_vision is None:
+            return 0.0, 0.0
+        vision = self._last_vision
+        obs = residual_observation(
+            vision.steering_error, vision.lateral_error, vision.heading_error, vision.found,
+            self._prev_delta_v, self._prev_delta_omega,
+            self._residual_use_wheel_speed_obs, self._residual_use_2d_action,
+            self._prev_wheel_command, self.robot.max_wheel_speed,
+        )
+        predicted, _ = self._residual_model.predict(obs, deterministic=True)
+        if self._residual_use_2d_action:
+            delta_v = float(np.clip(predicted[0], -self._residual_max_delta_v, self._residual_max_delta_v))
+            delta_omega = float(np.clip(predicted[1], -self._residual_max_delta_omega,
+                                         self._residual_max_delta_omega))
+        else:
+            delta_v = 0.0
+            delta_omega = float(np.clip(predicted[0], -self._residual_max_delta_omega,
+                                         self._residual_max_delta_omega))
+        self._prev_delta_v, self._prev_delta_omega = delta_v, delta_omega
+        return delta_v, delta_omega
+
+    def _on_timer(self) -> None:
+        if self._last_vision is None:
+            return  # no camera frame received yet
+        vision = self._last_vision
+        residual_delta_v, residual_delta_omega = self._residual_action()
+
+        wheel_cmd = self.controller.step(
+            steering_error=vision.steering_error, found=vision.found,
+            heading_error=vision.heading_error, lateral_error=vision.lateral_error,
+            residual_delta_omega=residual_delta_omega, residual_delta_v=residual_delta_v,
+        )
+        self._prev_wheel_command = (wheel_cmd.left, wheel_cmd.right)
+
+        linear = self.robot.wheel_radius * (wheel_cmd.left + wheel_cmd.right) / 2.0
+        angular = self.robot.wheel_radius * (wheel_cmd.right - wheel_cmd.left) / self.robot.wheel_separation
+        self.cmd_pub.publish(self._make_cmd_vel(linear, angular))
+        self._publish_diagnostics(vision, wheel_cmd)
+
+    def _make_cmd_vel(self, linear: float, angular: float):
+        twist = Twist(linear=Vector3(x=linear, y=0.0, z=0.0), angular=Vector3(x=0.0, y=0.0, z=angular))
+        if not self._cmd_vel_stamped:
+            return twist
+        msg = TwistStamped()
+        msg.header.stamp = self.get_clock().now().to_msg()
+        msg.header.frame_id = "base_link"
+        msg.twist = twist
+        return msg
+
+    def _publish_diagnostics(self, vision, wheel_cmd) -> None:
+        msg = Float32MultiArray()
+        msg.data = [
+            float(vision.steering_error),
+            float(vision.lateral_error),
+            float(vision.heading_error),
+            float(vision.confidence),
+            1.0 if vision.found else 0.0,
+            float(wheel_cmd.left),
+            float(wheel_cmd.right),
+        ]
+        self.diag_pub.publish(msg)
+
+
+def main(args: Optional[Sequence[str]] = None) -> None:
+    rclpy.init(args=args)
+    node = GazeboLineFollowerNode()
+    try:
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        node.cmd_pub.publish(node._make_cmd_vel(0.0, 0.0))
+        node.destroy_node()
+        if rclpy.ok():
+            rclpy.shutdown()
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,95 @@
+gazebo_line_follower_node:
+  ros__parameters:
+    image_topic: /camera/image_raw
+    cmd_vel_topic: /cmd_vel
+    diagnostic_topic: /gazebo_line_follower/debug
+
+    # TurtleBot3 Burger kinematics, matching mujoco_line_follower.yaml.
+    wheel_radius: 0.033
+    wheel_separation: 0.160
+    max_wheel_speed: 20.0
+
+    # LinePID gains (Kp_Line, Ki_Line, Kd_Line, N_Line in the model workspace).
+    kp: 4.5
+    ki: 0.0
+    kd: 0.45
+    n_filter: 20.0
+
+    # Camera-local path generator: vision.LineFollowerVision (Hough-seed +
+    # sliding-window + ground-quadratic-fit -- the algorithm shared by both
+    # platforms since MATLAB's 2026-07-22 vision unification, see
+    # common/vision.py), applied to real Gazebo camera frames using the
+    # Gazebo camera's own geometry.
+    #
+    # 2026-07-29 found-rate bug + fix, condensed (see LineFollowerVision.
+    # roi_widen_step's docstring in common/vision.py for the full writeup):
+    # this camera's roi_bottom_fraction=0.30/lookahead_distance=0.20 pair
+    # left the line sitting mostly ABOVE the ROI's far edge on gentle-curve
+    # maps (measured found_rate 16.5% on ellipse, confirmed by replaying
+    # saved frames through the real detector -- the ROI mask was genuinely
+    # empty, not a threshold/sign bug). MuJoCo's roi_bottom_fraction=0.30/
+    # lookahead_distance=0.40 pair does bracket its own camera's near-field
+    # range correctly (100% found on the same map), which is why only Gazebo
+    # has this problem. A single static roi_bottom_fraction can't serve both
+    # gentle- and sharp-curve maps (0.50 fixed ellipse to 97.5% but dropped
+    # track_hard from ~100% to 68.6%) -- fixed instead with the adaptive
+    # retry below (roi_widen_step/roi_widen_max): try the narrow, precise ROI
+    # first, only widen if it finds nothing this frame.
+    #
+    # VERIFIED (multiple 25-45s runs per map, pure PID, this default config):
+    #   ellipse:     94-100% found (3 runs: 96.4%, 100%, 94.0%)
+    #   track_hard:  62-100% found (4 runs: 61.8%, 100%, 67.1%, 100%) --
+    #     still has real run-to-run variance (hairpins are genuinely harder,
+    #     and live-sim timing isn't perfectly reproducible run to run), but
+    #     no run regressed anywhere near the pre-fix ellipse number, and nothing
+    #     here suggests the adaptive retry itself is the cause of the
+    #     variance (single-static-ROI track_hard runs earlier in this
+    #     investigation showed similar spread). MuJoCo re-checked unaffected
+    #     (100% found, identical to before) -- the widen path essentially
+    #     never triggers there since its narrow attempt already succeeds.
+    # 2026-08-01: raised 0.3 -> 0.5 to fix simple map's narrow-ROI failures
+    # (17.2% of frames, causing roi_widen_step to fire constantly and inject
+    # discontinuous steering-error jumps -- see the vision-shadow-probe
+    # analysis; 0.5 measured 0.0% narrow-ROI failure on simple). Trade-off
+    # (documented, not yet re-measured after this change): the same static
+    # value regressed track_hard's found-rate from ~100% to ~68.6% in the
+    # 2026-07-29 ellipse investigation (wider ROI picks up confusing/adjacent
+    # line segments on tight turns) -- accepted per user direction, no
+    # per-map override mechanism exists yet to avoid this trade-off.
+    roi_bottom_fraction: 0.5
+    num_points: 30
+    lookahead_distance: 0.20
+    lateral_gain: 0.6
+    heading_gain: 0.35
+    curvature_gain: 0.04
+    min_brightness: 70.0
+    max_saturation: 0.30
+    min_pixels: 30.0
+    error_scale: 500.0
+    # Adaptive-ROI fallback implementing the fix described above: retry once
+    # with the ROI widened by roi_widen_step (clamped to roi_widen_max) if
+    # roi_bottom_fraction finds nothing this frame. 0.0 = disabled.
+    roi_widen_step: 0.2
+    roi_widen_max: 0.7
+
+    # Optional inference-only SAC/PPO residual policy (see
+    # simple_camera_pid.common.residual_policy for the full checkpoint-
+    # generation table). Empty path = pure PID baseline. These are the safe
+    # ros2-run-without-launch-file fallback values (1-D action, no
+    # wheel-speed obs); gazebo_line_follower.launch.py's own argument
+    # defaults are what actually get used for `ros2 launch` (including
+    # real-hardware runs against this same node).
+    residual_model_path: ""
+    residual_algo: sac
+    residual_max_delta_omega: 1.0
+    residual_max_delta_v: 1.0  # only used if residual_use_2d_action
+    # False: 5-D obs, matches simple_camera_pid.training (in-repo
+    # SAC/PPO). True: adds normalized wheel-speed feedback, matching the
+    # HPC/lsac-based train_sac_residual.py/train_ppo_residual.py at the
+    # package root.
+    residual_use_wheel_speed_obs: false
+    # False: 1-D action (delta_omega only). True: 2-D action
+    # [delta_v, delta_omega], matching hpc/0721+/hpc/0724's residual model
+    # (post-2026-07-21 Diff_Drive_Kinematics refactor) -- requires
+    # residual_use_wheel_speed_obs: true too.
+    residual_use_2d_action: false
