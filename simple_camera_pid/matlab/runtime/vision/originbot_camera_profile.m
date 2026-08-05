@@ -26,7 +26,8 @@ expectedPixels = 640 * 480 * 3;   % 三平台 2026-08-03 起统一分辨率
 
 switch platform
     case 'gazebo'
-        % ── Gazebo：TurtleBot3 Burger 前置相机（RealSense r200 光学参数，水平安装）──
+        % ── Gazebo：TurtleBot3 Burger 前置相机（2026-08-04 起为 Raspberry Pi
+        % Camera Module v2 光学参数 + 15° 下俯，与真车/MuJoCo 一致）──
         % 2026-08-03 起分辨率从 800x600 改回 640x480，与 MuJoCo/real 三平台
         % 统一（此前 2026-07-31~2026-08-03 曾用过 800x600，见 git 历史/
         % model.sdf 的 <image> 注释）。640x480 与之前的 800x600 同为 4:3，
@@ -39,9 +40,9 @@ switch platform
         prof.ImageWidth  = 640;
         prof.ImageHeight = 480;
         prof.NeedsFlip   = false;   % ROS image_raw 顶行在上，帧本就正立
-        prof.FovyDeg     = 45.9857; % 由 SDF horizontal_fov=1.02974 rad 按 4:3 换算
+        prof.FovyDeg     = 48.6867; % 2026-08-04 换 Pi Cam v2：SDF horizontal_fov=1.0855948 rad 按 4:3 换算
         prof.MountHeight = 0.133;   % 相机离地高度(m)
-        prof.PitchDeg    = 0;       % 水平安装，无下俯
+        prof.PitchDeg    = 15;      % 2026-08-04 恢复 15° 下俯，与真车/MuJoCo 一致
         prof.WindowHalfWidth = 20;
         prof.MinWindowPixels = 5;
         prof.HoughMinLength  = 40;
@@ -58,20 +59,22 @@ switch platform
         prof.ImageWidth  = 640;
         prof.ImageHeight = 480;
         prof.NeedsFlip   = true;    % MuJoCo framebuffer 为 bottom-row-first，需翻正
-        prof.FovyDeg     = 45.9857; % MJCF <camera fovy>，垂直 FOV
+        prof.FovyDeg     = 48.6867; % MJCF <camera fovy>，垂直 FOV（2026-08-04 换 Pi Cam v2）
         prof.MountHeight = 0.133;   % 相机离地高度(m)
-        prof.PitchDeg    = 0;       % 水平安装，无下俯（拍平前为 15）
+        prof.PitchDeg    = 15;      % 2026-08-04 恢复 15° 下俯，与真车一致
         prof.WindowHalfWidth = 20;
         prof.MinWindowPixels = 5;
         prof.HoughMinLength  = 40;
         prof.HoughFillGap    = 20;
-        % 拍平后近端可视地面距离下限≈0.31m(由 MountHeight/FovyDeg 决定，水平相机
-        % physically 看不到更近的地面)，故 ROI/Lookahead 不能再沿用旧的 15°-下俯
-        % 时代数值(0.50/0.20)——0.20 会被下游 clamp 强制抬到约 0.31m 且不易察觉。
-        % 当前为几何推算的合理起点，尚未跑过 2026-07-19 那种真值调参 sweep，
-        % 建议后续用同样方法重新调优（见 vision-scheme-b-tuning 记忆）。
-        prof.DefaultROI       = 0.30;
-        prof.DefaultLookahead = 0.40;
+        % 2026-08-04 恢复 15° 下俯后，近端可视地面下限 =
+        % MountHeight/tan(PitchDeg + FovyDeg/2) = 0.133/tan(39.34°) ≈ 0.162m，
+        % 0.20 的 Lookahead 重新可达，故改回 0.50/0.20，与 Gazebo/真车一致
+        % （三平台现在同为 Pi Cam v2 + 15° 下俯）。此前 0.30/0.40 是
+        % 2026-07-22~2026-08-04 拍平期专用值：那时下限≈0.29m，0.20 会被下游
+        % clamp 抬高且不易察觉。当前仍为几何推算起点，尚未跑过 2026-07-19
+        % 那种真值调参 sweep，建议后续用同样方法重新调优。
+        prof.DefaultROI       = 0.50;
+        prof.DefaultLookahead = 0.20;
     case 'real'
         % ── 真实 TurtleBot3 Burger 相机 ── 2026-08-03 起本项目支持的第三个
         % 平台。ImageWidth/ImageHeight/PitchDeg 已对真车实测确认；
@@ -81,7 +84,7 @@ switch platform
         prof.ImageWidth  = 640;   % 2026-08-03 起真车相机驱动确认为此分辨率
         prof.ImageHeight = 480;
         prof.NeedsFlip   = false;   % ROS image_raw 顶行在上，帧本就正立
-        prof.FovyDeg     = 45.9857; % 未对真车单独标定，沿用 Gazebo/MuJoCo 数值
+        prof.FovyDeg     = 48.6867; % Pi Cam v2 官方规格推导，未对真车单独标定
         prof.MountHeight = 0.133;   % 未对真车单独标定，沿用 Gazebo/MuJoCo 数值
         prof.PitchDeg    = 15;      % 2026-08-03 对真车实测确认：15° 下俯安装
         prof.WindowHalfWidth = 20;

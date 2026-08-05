@@ -9,3 +9,8 @@ mujoco>=3.1
 gymnasium>=0.29
 stable-baselines3>=2.2
 matplotlib>=3.6
+# torch arrives transitively via stable-baselines3; listed explicitly because
+# the CUDA variant matters and pip picks it from the default index. The HPC
+# (LSAC) env pins cu124 for that cluster's driver; on a local box install the
+# variant matching `nvidia-smi`'s CUDA version instead of pinning cu124 here.
+torch>=2.2

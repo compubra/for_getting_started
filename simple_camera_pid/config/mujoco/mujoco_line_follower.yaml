@@ -24,12 +24,18 @@ mujoco_line_follower_node:
     kd: 0.35
     n_filter: 20.0
 
-    # Camera-local path generator (LocalPath_* in the model workspace). ROI/
-    # lookahead match the post-2026-07-22 defaults (MuJoCo camera flattened to
-    # level, raising the near-visible-ground-distance floor to ~0.31m -- the
-    # old 0.50/0.20 pair predates that and is no longer geometrically valid).
-    roi_bottom_fraction: 0.30
-    lookahead_distance: 0.40
+    # Camera-local path generator (LocalPath_* in the model workspace).
+    # 2026-08-04: back to the 0.50/0.20 pair. The 0.30/0.40 pair it replaces
+    # was derived for the 2026-07-22..2026-08-04 level-camera era, where the
+    # nearest visible ground sat at ~0.29m so a 0.20 lookahead was silently
+    # clamped. With the camera back at 15 deg down-pitch (and now Pi Cam v2
+    # optics, fovy 48.6867) that floor drops to
+    # mount_height/tan(pitch + fovy/2) = 0.133/tan(39.34deg) = 0.162m, so 0.20
+    # is reachable again and matches Gazebo/real, which share this camera.
+    # Geometry-derived, NOT swept against ground truth -- re-tune if found_rate
+    # disappoints on curves.
+    roi_bottom_fraction: 0.50
+    lookahead_distance: 0.20
     lateral_gain: 0.6
     heading_gain: 0.35
     curvature_gain: 0.04

@@ -32,11 +32,13 @@ Prerequisites
   * The robot model itself (model/gazebo/turtlebot3/models/
     turtlebot3_burger_line_follower/) is vendored in this repo — official
     turtlebot3_burger ships with no camera, so this project's own model adds
-    one (same Intel RealSense r200 optics as stock turtlebot3_waffle; see
-    that model's model.config for details). It is spawned by absolute path
+    one, modelling the official Raspberry Pi Camera Module v2 (IMX219) the
+    real robot carries, mounted at 15 deg down-pitch to match it (see that
+    model's model.config for details). It is spawned by absolute path
     (not `model://...`), so it resolves regardless of GZ_SIM_RESOURCE_PATH.
+    The LDS lidar was removed on 2026-08-04 (pure-vision line following).
   * turtlebot3_gazebo must still be installed: the robot model's meshes
-    (turtlebot3_common/meshes/...) and LIDAR/IMU/camera sensor plugins are
+    (turtlebot3_common/meshes/...) and IMU/camera sensor plugins are
     referenced from that package, so its models/ folder needs to be on
     GZ_SIM_RESOURCE_PATH too (this launch file appends it automatically from
     the ROS 2 install, see set_turtlebot3_common_path below).
