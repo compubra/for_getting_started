@@ -39,38 +39,63 @@ class CameraParams:
 
 
 def turtlebot3_burger_mujoco_camera() -> CameraParams:
-    """TurtleBot3 Burger MuJoCo front camera, level mount (pitch=0).
+    """TurtleBot3 Burger MuJoCo front camera: Pi Cam v2 optics, 15 deg down-pitch.
 
     Source: turtlebot3_burger_vehicle_body.xml + scene <global offwidth/offheight>,
-    xyaxes="0 -1 0 0 0 1". Flattened from a 15 deg down-pitch mount on 2026-07-22 to
-    match Gazebo's always-level camera (see originbot_camera_profile.m and
-    matlab/archive/archive_vision_scheme_a/README_RESTORE.md for the old pitched
-    calibration and the scheme-A algorithm it went with).
+    xyaxes="0 -1 0 0.258819 0 0.965926".
+
+    2026-08-04: two changes, both to match the real robot.
+
+    * Optics: Intel RealSense r200 -> official Raspberry Pi Camera Module v2
+      (IMX219), which is what the hardware carries. fovy_deg re-derived from
+      the module's official 62.2 deg horizontal FOV at this 4:3 output:
+      2*atan((480/640)*tan(62.2deg/2)) = 48.6867 deg (official spec quotes
+      48.8 deg vertical; the 0.11 deg gap is spec rounding). The IMX219's
+      native 3280x2464 is itself 4:3, so 640x480 is not cropped and the full
+      sensor FOV applies -- if the output ever moves to a non-4:3 ratio this
+      MUST be re-derived, it does not simply scale.
+    * Pitch: restored to 15 deg down, matching config/real/real_line_follower.yaml's
+      camera_pitch_deg (confirmed 2026-08-03 against the hardware). It had been
+      flattened to 0 deg on 2026-07-22 to match the then-level Gazebo camera;
+      Gazebo has now been pitched to 15 deg too, so all three platforms agree.
+
+    default_roi/default_lookahead go back to the pitched-camera values
+    (0.50/0.20). At 15 deg down-pitch the nearest visible ground is
+    mount_height/tan(pitch + fovy/2) = 0.162 m, so a 0.20 m lookahead is
+    reachable; at 0 deg it was 0.294 m, which is why lookahead had been raised
+    to 0.40 while flat. These are geometry-derived starting points, NOT the
+    product of a ground-truth tuning sweep -- re-tune against real frames.
     """
     return CameraParams(
         image_width=640,
         image_height=480,
-        fovy_deg=45.9857,
+        fovy_deg=48.6867,
         mount_height=0.133,
-        pitch_deg=0.0,
+        pitch_deg=15.0,
         needs_flip=True,
-        window_half_width=20.0,
+        window_half_width=30.0,
         min_window_pixels=5.0,
         hough_min_length=40.0,
         hough_fill_gap=20.0,
-        default_roi=0.30,
-        default_lookahead=0.40,
+        default_roi=0.50,
+        default_lookahead=0.20,
     )
 
 
 def turtlebot3_burger_gazebo_camera() -> CameraParams:
-    """TurtleBot3 Burger Gazebo front camera (horizontal, no pitch).
+    """TurtleBot3 Burger Gazebo front camera: Pi Cam v2 optics, 15 deg down-pitch.
 
     Official turtlebot3_burger has no built-in camera; this project's local
     Gazebo model (model/gazebo/turtlebot3/models/turtlebot3_burger_line_follower)
-    adds one using the same Intel RealSense r200 optics as stock
-    turtlebot3_waffle (horizontal_fov=1.02974 rad converted to the equivalent
-    vertical FOV) so the vision pipeline's calibration stays valid.
+    adds one modelling the official Raspberry Pi Camera Module v2 (IMX219) that
+    the real robot carries.
+
+    2026-08-04: switched from Intel RealSense r200 optics (horizontal_fov
+    1.02974 rad, fovy 45.9857) to Pi Cam v2 (horizontal_fov 1.0855948 rad =
+    62.2 deg, fovy re-derived to 48.6867 at 4:3), and pitched 15 deg down to
+    match the real robot -- see turtlebot3_burger_mujoco_camera() above for the
+    full derivation and the roi/lookahead consequences, which apply identically
+    here since both platforms now share one camera model.
 
     2026-08-03: image_width/image_height set to 640x480 to match the real
     TurtleBot3's camera (its driver was reconfigured to this resolution) and
@@ -78,29 +103,43 @@ def turtlebot3_burger_gazebo_camera() -> CameraParams:
     resolution. This was 800x600 from 2026-07-31 to 2026-08-03 (downscaled
     from an original 1920x1080 for render-cost reasons -- see git history/
     model.sdf's <image> comment if reviving that reasoning); 640x480 is 4:3,
-    the SAME aspect ratio as that 800x600, so fovy_deg does NOT need
-    re-deriving (still 45.9857, derived from the SDF's fixed horizontal_fov
-    of 1.02974 rad -- a near-exact match to turtlebot3_burger_mujoco_camera()'s
-    own 45.9857, since that camera is also 4:3 -- coincidence of aspect
-    ratio, not shared derivation). The four pixel-scale constants below
+    the SAME aspect ratio as that 800x600, so fovy_deg did not need
+    re-deriving at that time (it was then 45.9857, from the r200's
+    horizontal_fov of 1.02974 rad; superseded by the 2026-08-04 entry above).
+    The four pixel-scale constants below
     (which describe real-world feature sizes in pixels, not angles) scale
     linearly by image_width/640 (the same rule turtlebot3_burger_real_camera()
     below documents) -- at 640 wide that ratio is exactly 1.0, so they're
-    back to their original values (window_half_width=20, min_window_pixels=5,
+    back to their original values (window_half_width=30, min_window_pixels=5,
     hough_min_length=40, hough_fill_gap=20), identical to
     turtlebot3_burger_mujoco_camera()'s own numbers. Whenever width/height
     here changes again, fovy_deg MUST be recomputed from horizontal_fov + the
     new aspect ratio if the ratio changes (it does not simply scale), and
     these four constants rescaled by the new image_width/640 ratio.
+
+    2026-08-04: window_half_width 20 -> 30 (both this and
+    turtlebot3_burger_mujoco_camera(), plus turtlebot3_burger_real_camera()'s
+    scale-from-640 base below) -- a real-hardware debug session found the
+    sliding window visibly too narrow to reliably straddle the line under
+    real camera noise (a 40px-wide window at 640px-wide frames is a small
+    target once the line's detected column jitters by even a few px frame to
+    frame -- see vision.py's _hough_seed prev_base_col tie-break for the
+    related Hough-seed noise-sensitivity fix from the same session). 30 is a
+    moderate widen (not the 60 an old archived MATLAB Gazebo-only scheme once
+    used, matlab/archive/archive_vision_scheme_a/ -- that was tuned for a
+    different, now-superseded camera/resolution and isn't a validated number
+    for this camera). Re-verify found_rate on both track_easy and
+    track_hard after any further change here (see roi_widen_step's docstring
+    for how this project measures that).
     """
     return CameraParams(
         image_width=640,
         image_height=480,
-        fovy_deg=45.9857,
+        fovy_deg=48.6867,
         mount_height=0.133,
-        pitch_deg=0.0,
+        pitch_deg=15.0,
         needs_flip=False,
-        window_half_width=20.0,
+        window_half_width=30.0,
         min_window_pixels=5.0,
         hough_min_length=40.0,
         hough_fill_gap=20.0,

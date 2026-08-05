@@ -40,7 +40,13 @@
     camera_profile: real
     image_width: 640     # CONFIRMED 2026-08-03: real camera driver reconfigured to this
     image_height: 480    # CONFIRMED 2026-08-03: real camera driver reconfigured to this
-    camera_fovy_deg: 45.9857     # UNCONFIRMED as a real measurement -- see note above
+    # 2026-08-04: 45.9857 (an Intel RealSense r200 leftover, copied from the
+    # old Gazebo preset) -> 48.6867, derived from the official Raspberry Pi
+    # Camera Module v2 (IMX219) spec the real robot actually uses: 62.2 deg
+    # horizontal, so 2*atan((480/640)*tan(62.2deg/2)) = 48.6867 at this 4:3
+    # output (official quotes 48.8 vertical; 0.11 deg is spec rounding).
+    # Spec-derived, so still not a per-unit MEASUREMENT -- calibrate to be sure.
+    camera_fovy_deg: 48.6867     # UNCONFIRMED as a real measurement -- see note above
     camera_mount_height: 0.133   # UNCONFIRMED as a real measurement -- see note above
     camera_pitch_deg: 15.0       # CONFIRMED 2026-08-03 against the real robot
 
@@ -50,14 +56,36 @@
     # started as the Gazebo values; re-measure found-rate on your real track
     # before trusting them (see common/vision.py's roi_widen_step docstring
     # for how this project debugged the same problem in sim).
+    #
+    # 2026-08-04: min_brightness 70 -> 170, max_saturation 0.30 -> 0.20.
+    # Root-caused a live oscillation crash (control_node commanded violent
+    # wheel-speed swings, robot span in place) to _detect_mask's real-frame
+    # segmentation, not the PID gains -- see lap_20260804_162821 bag
+    # analysis. Extracted the exact frames around the crash and reran
+    # LineFollowerVision offline: the false-positive frame had 50.5% of the
+    # ROI's ground pixels sitting in the value=[70,90) bin (vs. 24.7% in a
+    # clean frame moments before) -- ordinary asphalt brightness had drifted
+    # up to sit ON TOP OF the old min_brightness=70 threshold, so roughly
+    # half the ground got flagged as line-candidate and the sliding window
+    # snapped between the real line and that false region, flipping
+    # steering_error from +0.42 to -0.12 in under 100ms. Value=[110,190) was
+    # essentially EMPTY in both frames (line pixels sit at 200+, ground never
+    # got above ~90) -- 170 sits in that gap with margin on both sides, so it
+    # should hold even as ground brightness drifts with real lighting.
+    # max_saturation tightened alongside it since ground saturation (p90
+    # ~0.10-0.11 in both sampled frames) turned out to contribute little
+    # separation from line pixels (~0.01-0.02) at 0.30 -- 0.20 gives it some
+    # actual filtering power without touching the line's own ~0.02. Both
+    # derived from only two real frames (one clean, one mid-crash) -- re-tune
+    # against a fuller real-track sample if false positives recur.
     roi_bottom_fraction: 0.3
     num_points: 30
     lookahead_distance: 0.20
     lateral_gain: 0.6
     heading_gain: 0.35
     curvature_gain: 0.04
-    min_brightness: 70.0
-    max_saturation: 0.30
+    min_brightness: 170.0
+    max_saturation: 0.20
     min_pixels: 30.0
     error_scale: 500.0
     roi_widen_step: 0.2

@@ -104,7 +104,7 @@ class _DetectAttempt:
 class LineFollowerVision:
     """Stateful port of ``originbot_sliding_window_path_generator`` (persistent vars)."""
 
-    roi_bottom_fraction: float = 0.30
+    roi_bottom_fraction: float = 0.40
     waypoint_count: int = 30
     min_brightness: float = 70.0
     max_saturation: float = 0.30
