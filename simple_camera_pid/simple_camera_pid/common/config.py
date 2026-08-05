@@ -37,6 +37,21 @@ class ControllerConfig:
     recovery_limit: float = 0.45         # Recovery_Steering_Limit
     line_found_speed_gain: float = 0.8   # Line_Found_Speed_Gain
     min_search_speed_bias: float = 0.2   # Minimum_Search_Speed bias
+    # Not in the original Simulink model -- added 2026-08-05 after a real-robot
+    # incident where repeated brief line losses (each under a second) kept the
+    # robot crawling forward at min_search_speed_bias's fixed 20% speed
+    # indefinitely while recovery steering (see the docstring above) snapped
+    # to +/-recovery_limit each time, producing a sustained side-to-side
+    # oscillation across the line rather than a controlled stop. These two
+    # taper forward speed toward zero the longer the line has been lost,
+    # independent of (and in addition to) vision.py's own steering-only
+    # freeze/decay (FREEZE_TIMEOUT/SLOWDOWN_TIMEOUT there): a loss shorter
+    # than lost_speed_freeze_timeout still gets the full-speed "search crawl"
+    # (matches prior behavior, fine for single-frame noise); past that it
+    # ramps down to a full stop by lost_speed_stop_timeout instead of
+    # crawling forward blind.
+    lost_speed_freeze_timeout: float = 0.5
+    lost_speed_stop_timeout: float = 1.5
 
 
 @dataclass

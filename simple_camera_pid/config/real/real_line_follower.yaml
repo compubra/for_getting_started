@@ -72,7 +72,18 @@
     # real-camera noise characteristics -- real frames are noisier than a
     # rendered mask, and real-world lighting will need re-tuning of
     # min_brightness/max_saturation above.
-    kp: 5.0
+    #
+    # kp dropped 5.0 -> 2.0 on 2026-08-04: with max_angular_speed=1.0, kp=5.0
+    # saturated the angular command at any |steering_error| > 0.2 -- easily
+    # crossed once the robot is actually moving (static bench tests already
+    # measured steering_error ~0.17 on a centered line), and once saturated
+    # there's no proportional gradient left to self-correct, which is
+    # exactly what caused a real spin-in-place incident that day (confirmed
+    # via /line_follower/debug: wheel_left=-1.34, wheel_right=3.505 rad/s,
+    # frozen at max saturation). 2.0 pushes the saturation boundary out to
+    # |steering_error| > 0.5 -- re-tune from this run's data, not a
+    # validated final value either.
+    kp: 2.0
     ki: 0.0
     kd: 0.35
     n_filter: 20.0

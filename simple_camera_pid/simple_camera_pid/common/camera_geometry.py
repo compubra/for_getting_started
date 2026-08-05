@@ -27,7 +27,7 @@ class CameraParams:
     mount_height: float   # camera height above ground (m)
     pitch_deg: float      # downward pitch, 0 = horizontal (degrees)
     needs_flip: bool      # True if the raw frame is bottom-row-first (MuJoCo framebuffer)
-    window_half_width: float    # sliding-window half-width (px)
+    window_half_width: float    # sliding-window search radius (px) -- see _find_nearest_run
     min_window_pixels: float    # min white pixels for a window to count as valid
     hough_min_length: float     # houghlines MinLength (px)
     hough_fill_gap: float       # houghlines FillGap (px)
@@ -139,6 +139,22 @@ def turtlebot3_burger_real_camera(
     ``VisionConfig`` / the node's ROS parameters) against real frames before
     trusting the found-rate, the same way the Gazebo camera's roi defaults
     were empirically tuned (see ``vision.py``'s ``roi_widen_step`` docstring).
+
+    ``window_half_width`` (180px here, scaled) is NOT this robot's actual
+    line width -- since 2026-08-05 ``_find_nearest_run`` measures that
+    directly per row from the mask (see its docstring), so this only needs
+    to be a generous search radius around the previous row's column, wide
+    enough to comfortably contain the widest the line is ever measured at
+    plus margin for base_col drift between rows/frames. 640-px-wide real
+    frames on this robot's track measured a 130-161px-wide tape line
+    (``python3 -c`` brightness/saturation-threshold column scan on a live
+    frame, 2026-08-05) -- 180px clears that with room to spare. Was 20px
+    (a stale carry-over from being the actual centroid-window width, back
+    when it was one) until that same measurement showed it covered barely
+    a eighth of the true line width, letting the sliding window lock onto
+    either edge of the line at random rather than its center -- see the
+    real-robot spin/wobble incidents this caused, and _find_nearest_run's
+    docstring for the fix.
     """
     scale = image_width / 640.0
     return CameraParams(
@@ -148,7 +164,7 @@ def turtlebot3_burger_real_camera(
         mount_height=mount_height,
         pitch_deg=pitch_deg,
         needs_flip=False,
-        window_half_width=20.0 * scale,
+        window_half_width=180.0 * scale,
         min_window_pixels=5.0 * scale,
         hough_min_length=40.0 * scale,
         hough_fill_gap=20.0 * scale,

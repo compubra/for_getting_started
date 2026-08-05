@@ -21,6 +21,7 @@ residual models) and ``Curve_Speed_Governor`` blocks inside
 """
 from __future__ import annotations
 
+import sys
 from dataclasses import dataclass, field
 
 from ..config import ControllerConfig, CurveSpeedGovernorConfig, RobotConfig
@@ -51,6 +52,7 @@ class LineFollowerController:
     governor: CurveSpeedGovernorConfig = field(default_factory=CurveSpeedGovernorConfig)
 
     _pid: FilteredPID = field(init=False, repr=False)
+    _lost_time: float = field(default=0.0, init=False, repr=False)
 
     def __post_init__(self) -> None:
         self._pid = FilteredPID(
@@ -65,6 +67,24 @@ class LineFollowerController:
         self._pid.kd = self.controller.kd
         self._pid.n_filter = self.controller.n_filter
         self._pid.reset()
+        self._lost_time = 0.0
+
+    def _lost_speed_decay(self, found: bool) -> float:
+        """1.0 while the line is visible or only briefly lost (matches prior
+        behavior); ramps to 0.0 (full stop) the longer it stays lost -- see
+        lost_speed_freeze_timeout/lost_speed_stop_timeout's docstring in
+        config.py for why this exists."""
+        cfg = self.controller
+        if found:
+            self._lost_time = 0.0
+            return 1.0
+        self._lost_time += cfg.ts_control
+        if self._lost_time <= cfg.lost_speed_freeze_timeout:
+            return 1.0
+        if self._lost_time <= cfg.lost_speed_stop_timeout:
+            span = max(sys.float_info.epsilon, cfg.lost_speed_stop_timeout - cfg.lost_speed_freeze_timeout)
+            return 1.0 - (self._lost_time - cfg.lost_speed_freeze_timeout) / span
+        return 0.0
 
     def step(self, steering_error: float, found: bool, heading_error: float,
               lateral_error: float, residual_delta_omega: float = 0.0,
@@ -101,6 +121,17 @@ class LineFollowerController:
         residual_diff = residual_delta_omega * self.robot.wheel_separation / (2 * self.robot.wheel_radius)
         left = base_wheel_speed + residual_v_wheel - differential_speed + residual_diff
         right = base_wheel_speed + residual_v_wheel + differential_speed - residual_diff
+
+        # Scale the WHOLE command (translation + recovery-steering rotation),
+        # not just forward speed -- otherwise a long-lost line still spins
+        # the robot in place forever (equal-and-opposite wheel speeds) once
+        # base_wheel_speed alone reaches zero, instead of actually stopping.
+        # ``found``-branch behavior in the first lost_speed_freeze_timeout
+        # seconds is decay=1.0, i.e. unchanged from before this existed.
+        lost_speed_decay = self._lost_speed_decay(found)
+        left *= lost_speed_decay
+        right *= lost_speed_decay
+
         limit = self.robot.max_wheel_speed
         return WheelCommand(
             left=min(limit, max(-limit, left)),

@@ -23,7 +23,7 @@ import numpy as np
 from scipy import ndimage
 
 from .camera_geometry import CameraParams, ground_to_pixel, pixel_to_ground, turtlebot3_burger_mujoco_camera
-from .vision import _hough_seed
+from .vision import _find_nearest_run, _hough_seed
 
 ROI_FOUND_COLOR = (0, 120, 255)       # blue ROI border when the line is found (RGB)
 ROI_LOST_COLOR = (255, 0, 0)          # red ROI border when the line is lost
@@ -74,9 +74,13 @@ def _slide_windows_debug(
     mask: np.ndarray, path_top: int, base_col: float, drift_per_row: float, window_count: int,
     half_width: float, min_window_pixels: float,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    """Mirrors ``vision._slide_windows``, additionally returning each window's
-    full-image pixel rectangle (row_low, row_high, col_low, col_high), 0-indexed,
-    for drawing."""
+    """Mirrors ``vision._slide_windows`` (see its docstring and
+    ``_find_nearest_run``'s for the 2026-08-05 adaptive-width change),
+    additionally returning each window's full-image pixel rectangle
+    (row_low, row_high, col_low, col_high), 0-indexed, for drawing --
+    ``col_low``/``col_high`` are the *measured* run's own extent when a run
+    is found (so the drawn box reflects the actual detected line width, not
+    a fixed search box), and the search gate otherwise."""
     roi_height, image_width = mask.shape
     window_height = max(2, int(np.floor(roi_height / window_count)))
 
@@ -91,16 +95,15 @@ def _slide_windows_debug(
     for w in range(window_count):
         row_high = (roi_height - 1) - w * window_height
         row_low = max(0, row_high - window_height + 1)
-        col_low = max(0, int(round(current_col - half_width)))
-        col_high = min(image_width - 1, int(round(current_col + half_width)))
-        win_rects[w] = (row_low + path_top, row_high + path_top, col_low, col_high)
+        row_band = mask[row_low:row_high + 1, :]
+        col_mass = row_band.sum(axis=0)
 
-        window = mask[row_low:row_high + 1, col_low:col_high + 1]
-        pixel_count = int(window.sum())
-        if pixel_count >= min_window_pixels:
-            col_mass = window.sum(axis=0)
-            row_mass = window.sum(axis=1)
-            centroid_col = col_low + float((col_mass * np.arange(col_mass.size)).sum()) / pixel_count
+        run = _find_nearest_run(col_mass, current_col, half_width, min_window_pixels)
+        if run is not None:
+            left, right, pixel_count = run
+            win_rects[w] = (row_low + path_top, row_high + path_top, left, right)
+            centroid_col = 0.5 * (left + right)
+            row_mass = row_band[:, left:right + 1].sum(axis=1)
             centroid_row = row_low + float((row_mass * np.arange(row_mass.size)).sum()) / pixel_count
             if w > 0:
                 last_delta = centroid_col - current_col
@@ -109,6 +112,9 @@ def _slide_windows_debug(
             win_rows[w] = centroid_row + path_top
             win_valid[w] = True
         else:
+            col_low = max(0, int(round(current_col - half_width)))
+            col_high = min(image_width - 1, int(round(current_col + half_width)))
+            win_rects[w] = (row_low + path_top, row_high + path_top, col_low, col_high)
             current_col = max(0.0, min(image_width - 1.0, current_col + last_delta))
 
     return win_cols, win_rows, win_valid, win_rects

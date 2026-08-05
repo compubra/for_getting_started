@@ -97,6 +97,7 @@ class _DetectAttempt:
     y_points: np.ndarray
     valid: np.ndarray
     near_pixel_error: float
+    base_col: float
 
 
 @dataclass
@@ -161,6 +162,7 @@ class LineFollowerVision:
     _last_visible_steering: float = field(default=0.0, init=False, repr=False)
     _last_local_path_debug: np.ndarray = field(default=None, init=False, repr=False)
     _lost_line_time: float = field(default=0.0, init=False, repr=False)
+    _last_base_col: float | None = field(default=None, init=False, repr=False)
 
     def __post_init__(self) -> None:
         self.reset()
@@ -170,6 +172,7 @@ class LineFollowerVision:
         self._last_visible_steering = 0.0
         self._last_local_path_debug = np.zeros(DEBUG_WIDTH)
         self._lost_line_time = 0.0
+        self._last_base_col = None
 
     def step(self, rgb: np.ndarray) -> LocalPathResult:
         """Process one camera frame.
@@ -247,6 +250,7 @@ class LineFollowerVision:
             steering_error = current_steering_error
             self._last_visible_steering = steering_error
             self._last_local_path_debug = local_path_debug
+            self._last_base_col = attempt.base_col
         else:
             self._lost_line_time += CONTROL_PERIOD
             lateral_error = 0.0
@@ -264,6 +268,11 @@ class LineFollowerVision:
             else:
                 steering_error = 0.0
                 self._last_visible_steering = 0.0
+                # Stale column prior is worse than none once the line's been
+                # gone this long -- let the next sighting pick fresh (longest
+                # segment) rather than anchoring to a position that may no
+                # longer be anywhere near the line.
+                self._last_base_col = None
 
         return LocalPathResult(
             steering_error=steering_error,
@@ -290,7 +299,7 @@ class LineFollowerVision:
 
         base_col, drift_per_row, hough_found = _hough_seed(
             mask, self.camera.hough_min_length, self.camera.hough_fill_gap,
-            self.camera.max_drift_per_row,
+            self.camera.max_drift_per_row, prev_base_col=self._last_base_col,
         )
         if not hough_found and total_pixels > 0:
             near_start = max(0, mask.shape[0] - 1 - int(np.floor(mask.shape[0] / 3)))
@@ -317,6 +326,7 @@ class LineFollowerVision:
             total_pixels=total_pixels, valid_count=valid_count, found=found, confidence=confidence,
             win_cols=win_cols, win_rows=win_rows, win_valid=win_valid,
             x_points=x_points, y_points=y_points, valid=valid, near_pixel_error=near_pixel_error,
+            base_col=base_col,
         )
 
     def _detect_mask(self, rgb: np.ndarray, path_top: int, path_bottom: int) -> tuple[np.ndarray, int]:
@@ -366,12 +376,17 @@ class LineFollowerVision:
 
 def _hough_seed(
     mask: np.ndarray, hough_min_length: float, hough_fill_gap: float, max_drift_per_row: float,
+    prev_base_col: float | None = None,
 ) -> tuple[float, float, bool]:
     """Behavioral (not bit-exact) port of MATLAB's ``houghSeed``: finds the
     dominant line segment in the ROI mask via
     ``skimage.transform.probabilistic_hough_line`` and extrapolates it to the
     mask's bottom row, returning a 0-indexed seed column and column-drift-per-row
     for :func:`_slide_windows`.
+
+    ``prev_base_col``, when given, breaks ties among comparably-long
+    candidate segments in favor of temporal continuity -- see the note below
+    on why this matters for a real (non-simulated) camera.
     """
     if not mask.any():
         return 0.0, 0.0, False
@@ -394,41 +409,123 @@ def _hough_seed(
     if not segments:
         return 0.0, 0.0, False
 
-    best_len = -1.0
-    best_p0 = best_p1 = (0.0, 0.0)
-    for (x0, y0), (x1, y1) in segments:
-        length = math.hypot(x1 - x0, y1 - y0)
-        if length > best_len:
-            best_len = length
-            best_p0, best_p1 = (float(x0), float(y0)), (float(x1), float(y1))
-
-    p1_col, p1_row = best_p0
-    d_col = best_p1[0] - p1_col
-    d_row = best_p1[1] - p1_row
-    if d_row < 0:  # normalize direction to point toward larger row (down/near)
-        d_col, d_row = -d_col, -d_row
-
     bottom_row = mask.shape[0] - 1
-    if abs(d_row) < 1e-6:
-        base_col = p1_col + 0.5 * d_col
-        drift_per_row = 0.0
+
+    def _extrapolate(p0: tuple[float, float], p1: tuple[float, float]) -> tuple[float, float]:
+        col, row = p0
+        d_col = p1[0] - col
+        d_row = p1[1] - row
+        if d_row < 0:  # normalize direction to point toward larger row (down/near)
+            d_col, d_row = -d_col, -d_row
+        if abs(d_row) < 1e-6:
+            base = col + 0.5 * d_col
+            drift = 0.0
+        else:
+            drift = float(np.clip(d_col / d_row, -max_drift_per_row, max_drift_per_row))
+            base = col + (bottom_row - row) * drift
+        return float(np.clip(base, 0.0, mask.shape[1] - 1)), drift
+
+    # A real camera's line is several pixels wide, so its two long edges
+    # (left/right) both routinely qualify as "the dominant segment" --
+    # single-frame sensor/JPEG noise near either edge can flip which one
+    # probabilistic_hough_line happens to return as longest, even with a
+    # fixed rng seed (the seed only makes a GIVEN mask's sampling
+    # deterministic; it does not make near-identical masks agree with each
+    # other). Picking by raw length alone therefore lets the seed column
+    # swing across the full line width frame-to-frame (confirmed via
+    # synthetic 0.2%-pixel-flip perturbation: base_col jumped ~470 -> ~304,
+    # sign of drift_per_row included, on an otherwise-static scene).
+    #
+    # Fix: among candidates within 80% of the longest one's length (so short
+    # spurious segments still can't win), prefer whichever extrapolates
+    # closest to last frame's converged base_col -- the robot/line can't
+    # jump most of the image width in one ~50-60 ms control tick. Falls back
+    # to pure longest-segment selection when there's no prior (first frame,
+    # or the line was just reacquired after being lost).
+    candidates = [
+        (math.hypot(x1 - x0, y1 - y0), (float(x0), float(y0)), (float(x1), float(y1)))
+        for (x0, y0), (x1, y1) in segments
+    ]
+    best_len = max(length for length, _, _ in candidates)
+    length_gate = 0.8 * best_len
+    survivors = [c for c in candidates if c[0] >= length_gate]
+
+    if prev_base_col is None or len(survivors) == 1:
+        _, best_p0, best_p1 = max(survivors, key=lambda c: c[0])
     else:
-        drift_per_row = float(np.clip(d_col / d_row, -max_drift_per_row, max_drift_per_row))
-        base_col = p1_col + (bottom_row - p1_row) * drift_per_row
-    base_col = float(np.clip(base_col, 0.0, mask.shape[1] - 1))
+        def _distance_to_prior(c: tuple[float, tuple[float, float], tuple[float, float]]) -> float:
+            base, _ = _extrapolate(c[1], c[2])
+            return abs(base - prev_base_col)
+
+        _, best_p0, best_p1 = min(survivors, key=_distance_to_prior)
+
+    base_col, drift_per_row = _extrapolate(best_p0, best_p1)
     return base_col, drift_per_row, True
+
+
+def _find_nearest_run(
+    col_mass: np.ndarray, current_col: float, search_radius: float, min_pixels: float,
+) -> tuple[int, int, float] | None:
+    """Find the contiguous run of lit columns within +/-``search_radius`` of
+    ``current_col`` whose total pixel count meets ``min_pixels``, preferring
+    whichever run's midpoint sits closest to ``current_col`` (temporal/
+    spatial continuity -- guards against snapping to an unrelated blob
+    elsewhere in the search band). Returns 0-indexed ``(left, right,
+    pixel_count)`` of the run, or ``None`` if nothing qualifies.
+
+    2026-08-05: replaces the previous fixed-``half_width``-window pixel-mass
+    centroid (``window_half_width`` was 20px -- a 40px-wide search box --
+    while the real track's tape line measured 130-161px wide on camera: the
+    window could only ever see a slice of the line, so its centroid tracked
+    wherever that slice happened to land relative to the line rather than
+    the line's actual center, drifting between the two edges frame to frame
+    -- confirmed via vision_debug_node showing the tracked centroid pinned
+    to one edge of the visibly-wider line). Using the *measured* run's own
+    midpoint instead of a pixel-mass centroid inside an undersized window
+    adapts to whatever width the line actually is at each row, without a
+    hand-tuned pixel constant. ``search_radius`` (``window_half_width``) is
+    now just a generous gate against picking up a far-away unrelated bright
+    region, not the centroid computation window itself.
+    """
+    width = col_mass.size
+    lo = max(0, int(np.floor(current_col - search_radius)))
+    hi = min(width - 1, int(np.ceil(current_col + search_radius)))
+    if hi < lo:
+        return None
+    gated = col_mass[lo:hi + 1]
+    lit = np.flatnonzero(gated > 0)
+    if lit.size == 0:
+        return None
+
+    gaps = np.flatnonzero(np.diff(lit) > 1)
+    run_starts = np.concatenate(([0], gaps + 1))
+    run_ends = np.concatenate((gaps, [lit.size - 1]))
+
+    best = None
+    best_dist = np.inf
+    for s, e in zip(run_starts, run_ends):
+        left, right = int(lit[s] + lo), int(lit[e] + lo)
+        pixel_count = float(gated[lit[s]:lit[e] + 1].sum())
+        if pixel_count < min_pixels:
+            continue
+        dist = abs(0.5 * (left + right) - current_col)
+        if dist < best_dist:
+            best_dist = dist
+            best = (left, right, pixel_count)
+    return best
 
 
 def _slide_windows(
     mask: np.ndarray, path_top: int, base_col: float, drift_per_row: float, window_count: int,
     half_width: float, min_window_pixels: float, center_x: float,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, float]:
-    """Direct port of MATLAB's ``slideWindows``: bottom-up sliding windows,
-    each recentering on its white-pixel centroid; empty windows extrapolate
-    via the last known column delta. Returns 0-indexed window centroid
-    columns/rows (rows already translated to full-image coordinates),
-    validity, and the nearest valid window's column error from ``center_x``
-    (1-indexed, for direct use as the PID's immediate-feedback term).
+    """Bottom-up sliding windows, each row band recentering on the midpoint
+    of the nearest measured line-width run (see ``_find_nearest_run``);
+    empty windows extrapolate via the last known column delta. Returns
+    0-indexed window centroid columns/rows (rows already translated to
+    full-image coordinates), validity, and the nearest valid window's column
+    error from ``center_x`` (1-indexed, for direct use as the PID's
+    immediate-feedback term).
     """
     roi_height, image_width = mask.shape
     window_height = max(2, int(np.floor(roi_height / window_count)))
@@ -443,15 +540,14 @@ def _slide_windows(
     for w in range(window_count):
         row_high = (roi_height - 1) - w * window_height   # window bottom (near), inclusive
         row_low = max(0, row_high - window_height + 1)    # window top (far), inclusive
-        col_low = max(0, int(round(current_col - half_width)))
-        col_high = min(image_width - 1, int(round(current_col + half_width)))
+        row_band = mask[row_low:row_high + 1, :]
+        col_mass = row_band.sum(axis=0)
 
-        window = mask[row_low:row_high + 1, col_low:col_high + 1]
-        pixel_count = int(window.sum())
-        if pixel_count >= min_window_pixels:
-            col_mass = window.sum(axis=0)
-            row_mass = window.sum(axis=1)
-            centroid_col = col_low + float((col_mass * np.arange(col_mass.size)).sum()) / pixel_count
+        run = _find_nearest_run(col_mass, current_col, half_width, min_window_pixels)
+        if run is not None:
+            left, right, pixel_count = run
+            centroid_col = 0.5 * (left + right)
+            row_mass = row_band[:, left:right + 1].sum(axis=1)
             centroid_row = row_low + float((row_mass * np.arange(row_mass.size)).sum()) / pixel_count
             if w > 0:
                 last_delta = centroid_col - current_col
