@@ -35,6 +35,7 @@ Pipeline (mirrors the three-technique split in the MATLAB source):
 from __future__ import annotations
 
 import math
+from collections import deque
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -48,9 +49,27 @@ DEBUG_WIDTH = 7 + 2 * MAX_PATH_POINTS  # 7 scalars + 30 [x, y] path-point slots
 
 # Lost-line state-machine thresholds (control period = Ts_Control = 0.05 s, 20 Hz)
 CONTROL_PERIOD = 0.05
-FREEZE_TIMEOUT = 0.5     # < 0.5 s: momentary occlusion, freeze last steering
-SLOWDOWN_TIMEOUT = 1.5   # 0.5-1.5 s: linearly decay steering toward zero
+FREEZE_TIMEOUT = 0.5     # < 0.5 s: momentary occlusion, extrapolate steering trend (see below)
+SLOWDOWN_TIMEOUT = 1.5   # 0.5-1.5 s: linearly decay the extrapolated steering toward zero
 # > 1.5 s: genuinely lost; steering -> 0, hand off to parking/search upstream
+
+# 2026-08-06: real-hardware curves were confirmed (operator watching the
+# camera view directly) to swing the line outside the camera's fixed ~46 deg
+# optical FOV before the robot finishes the turn -- a real blind spot, not a
+# detection bug (ScalerCrop can't fix this: it can only crop/magnify the
+# existing optical FOV, never widen it beyond what the lens physically
+# captures), and not something ROI/lookahead tuning alone reaches either
+# since the line is genuinely out of frame, not just outside the ROI band.
+# During FREEZE_TIMEOUT, steering_error was previously held flat at
+# _last_visible_steering; it now extrapolates linearly using the steering
+# trend from the last STEERING_TREND_SAMPLES found=True frames instead, so a
+# robot that was already turning into the blind spot keeps turning at
+# roughly the rate it was, rather than freezing an instantaneous snapshot
+# right as the corner starts -- intended to bridge exactly this kind of
+# fixed-FOV blind spot, not general sensor noise. UNVALIDATED on real
+# hardware yet -- re-tune (sample count, whether to clamp the slope itself
+# rather than relying on step()'s existing +/-1.5 clip) from real test data.
+STEERING_TREND_SAMPLES = 5  # ~0.25s of history at 20 Hz
 
 # Platform-independent behavioral constants (originbot_sliding_window_path_generator.m's
 # "与平台无关的行为常数" block -- shared by both cameras, change here affects both).
@@ -163,6 +182,10 @@ class LineFollowerVision:
     _last_local_path_debug: np.ndarray = field(default=None, init=False, repr=False)
     _lost_line_time: float = field(default=0.0, init=False, repr=False)
     _last_base_col: float | None = field(default=None, init=False, repr=False)
+    _steering_history: deque = field(
+        default_factory=lambda: deque(maxlen=STEERING_TREND_SAMPLES), init=False, repr=False
+    )
+    _lost_steering_slope: float = field(default=0.0, init=False, repr=False)
 
     def __post_init__(self) -> None:
         self.reset()
@@ -173,6 +196,25 @@ class LineFollowerVision:
         self._last_local_path_debug = np.zeros(DEBUG_WIDTH)
         self._lost_line_time = 0.0
         self._last_base_col = None
+        self._steering_history.clear()
+        self._lost_steering_slope = 0.0
+
+    def _estimate_steering_slope(self) -> float:
+        """Rate of change of steering_error (per second) over the last
+        ``STEERING_TREND_SAMPLES`` found=True frames, via simple
+        least-squares -- used to extrapolate a trend into a fresh line loss
+        instead of freezing an instantaneous snapshot (see the module-level
+        note by STEERING_TREND_SAMPLES for why)."""
+        n = len(self._steering_history)
+        if n < 2:
+            return 0.0
+        xs = np.arange(n, dtype=float) * CONTROL_PERIOD
+        ys = np.array(self._steering_history, dtype=float)
+        x_mean, y_mean = xs.mean(), ys.mean()
+        denom = float(((xs - x_mean) ** 2).sum())
+        if denom < np.finfo(float).eps:
+            return 0.0
+        return float(((xs - x_mean) * (ys - y_mean)).sum() / denom)
 
     def step(self, rgb: np.ndarray) -> LocalPathResult:
         """Process one camera frame.
@@ -251,20 +293,40 @@ class LineFollowerVision:
             self._last_visible_steering = steering_error
             self._last_local_path_debug = local_path_debug
             self._last_base_col = attempt.base_col
+            self._steering_history.append(steering_error)
         else:
+            just_lost = self._lost_line_time == 0.0
             self._lost_line_time += CONTROL_PERIOD
             lateral_error = 0.0
             heading_error = 0.0
             local_path_debug = self._last_local_path_debug.copy()
             local_path_debug[0] = 0.0
 
+            if just_lost:
+                # Freeze the trend now, at the instant of loss -- not
+                # recomputed frame-to-frame while lost, since there's no new
+                # data to update it with until the line is seen again.
+                self._lost_steering_slope = self._estimate_steering_slope()
+
             if self._lost_line_time <= FREEZE_TIMEOUT:
-                steering_error = self._last_visible_steering
+                steering_error = float(np.clip(
+                    self._last_visible_steering
+                    + self._lost_steering_slope * self._lost_line_time,
+                    -1.5, 1.5,
+                ))
             elif self._lost_line_time <= SLOWDOWN_TIMEOUT:
+                # Decay from where the extrapolation above left off at
+                # exactly t=FREEZE_TIMEOUT, not from the raw last-visible
+                # value, so steering_error stays continuous across the
+                # freeze/slowdown boundary instead of jumping.
+                extrapolated_at_freeze_end = float(np.clip(
+                    self._last_visible_steering + self._lost_steering_slope * FREEZE_TIMEOUT,
+                    -1.5, 1.5,
+                ))
                 decay = 1.0 - (self._lost_line_time - FREEZE_TIMEOUT) / max(
                     np.finfo(float).eps, SLOWDOWN_TIMEOUT - FREEZE_TIMEOUT
                 )
-                steering_error = self._last_visible_steering * decay
+                steering_error = extrapolated_at_freeze_end * decay
             else:
                 steering_error = 0.0
                 self._last_visible_steering = 0.0
@@ -273,6 +335,8 @@ class LineFollowerVision:
                 # segment) rather than anchoring to a position that may no
                 # longer be anywhere near the line.
                 self._last_base_col = None
+                self._steering_history.clear()
+                self._lost_steering_slope = 0.0
 
         return LocalPathResult(
             steering_error=steering_error,

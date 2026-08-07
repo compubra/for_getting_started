@@ -34,6 +34,7 @@ Usage (on the PC)
 """
 from __future__ import annotations
 
+import signal
 from typing import Optional, Sequence, Tuple
 
 import numpy as np
@@ -247,12 +248,32 @@ class LineFollowerControlNode(Node):
 def main(args: Optional[Sequence[str]] = None) -> None:
     rclpy.init(args=args)
     node = LineFollowerControlNode()
+
+    # See the identical fix/comment in real/line_follower_node.py's main():
+    # rclpy.init()'s own default SIGINT handler can invalidate the rcl
+    # context before `except KeyboardInterrupt` below ever runs, so
+    # publishing the safety-stop there raced with it and regularly failed
+    # (RCLError: "publisher's context is invalid") -- confirmed on real
+    # hardware 2026-08-07. Publishing synchronously from our own handler,
+    # before rclpy's default handler (called via previous_handler below)
+    # gets a chance to run, closes that race.
+    previous_handler = signal.getsignal(signal.SIGINT)
+
+    def _publish_safety_stop(signum, frame):
+        try:
+            node.cmd_pub.publish(node._make_cmd_vel(0.0, 0.0))
+        except Exception:
+            pass
+        if callable(previous_handler):
+            previous_handler(signum, frame)
+
+    signal.signal(signal.SIGINT, _publish_safety_stop)
+
     try:
         rclpy.spin(node)
     except KeyboardInterrupt:
         pass
     finally:
-        node.cmd_pub.publish(node._make_cmd_vel(0.0, 0.0))
         node.destroy_node()
         if rclpy.ok():
             rclpy.shutdown()

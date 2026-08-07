@@ -32,6 +32,7 @@ Usage
 """
 from __future__ import annotations
 
+import signal
 from typing import Optional, Sequence, Tuple
 
 import numpy as np
@@ -132,6 +133,8 @@ class GazeboLineFollowerNode(Node):
                 fovy_deg=self.get_parameter("camera_fovy_deg").value,
                 mount_height=self.get_parameter("camera_mount_height").value,
                 pitch_deg=self.get_parameter("camera_pitch_deg").value,
+                roll_deg=self.get_parameter("camera_roll_deg").value,
+                yaw_deg=self.get_parameter("camera_yaw_deg").value,
             )
         elif camera_profile == "gazebo":
             camera_params = turtlebot3_burger_gazebo_camera()
@@ -246,6 +249,8 @@ class GazeboLineFollowerNode(Node):
         self.declare_parameter("camera_fovy_deg", 45.9857)
         self.declare_parameter("camera_mount_height", 0.133)
         self.declare_parameter("camera_pitch_deg", 15.0)
+        self.declare_parameter("camera_roll_deg", 0.0)
+        self.declare_parameter("camera_yaw_deg", 0.0)
         self.declare_parameter("roi_bottom_fraction", 0.3)
         self.declare_parameter("num_points", 30)
         self.declare_parameter("lookahead_distance", 0.20)
@@ -348,12 +353,37 @@ class GazeboLineFollowerNode(Node):
 def main(args: Optional[Sequence[str]] = None) -> None:
     rclpy.init(args=args)
     node = GazeboLineFollowerNode()
+
+    # rclpy.init()'s own default SIGINT handler can invalidate the rcl
+    # context before this function's `except KeyboardInterrupt` block ever
+    # runs, so publishing the safety-stop there raced with it and regularly
+    # failed (RCLError: "publisher's context is invalid") -- confirmed on
+    # real hardware 2026-08-07 (with this node driving a real TurtleBot3 via
+    # camera_profile:=real): the node died without ever sending the zero
+    # command, leaving the robot executing its last nonzero /cmd_vel
+    # indefinitely (turtlebot3_node has no command watchdog of its own).
+    # Publishing synchronously from our own handler, before rclpy's default
+    # handler (called via previous_handler below) gets a chance to run,
+    # closes that race. Harmless under Gazebo, where an abandoned /cmd_vel
+    # only spins a simulated robot -- kept unconditional so the two
+    # deployments can't drift apart. Same fix in real/control_node.py.
+    previous_handler = signal.getsignal(signal.SIGINT)
+
+    def _publish_safety_stop(signum, frame):
+        try:
+            node.cmd_pub.publish(node._make_cmd_vel(0.0, 0.0))
+        except Exception:
+            pass
+        if callable(previous_handler):
+            previous_handler(signum, frame)
+
+    signal.signal(signal.SIGINT, _publish_safety_stop)
+
     try:
         rclpy.spin(node)
     except KeyboardInterrupt:
         pass
     finally:
-        node.cmd_pub.publish(node._make_cmd_vel(0.0, 0.0))
         node.destroy_node()
         if rclpy.ok():
             rclpy.shutdown()

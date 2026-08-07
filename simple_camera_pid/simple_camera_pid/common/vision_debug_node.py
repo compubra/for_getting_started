@@ -155,6 +155,8 @@ class VisionDebugNode(Node):
                 fovy_deg=self.get_parameter("camera_fovy_deg").value,
                 mount_height=self.get_parameter("camera_mount_height").value,
                 pitch_deg=self.get_parameter("camera_pitch_deg").value,
+                roll_deg=self.get_parameter("camera_roll_deg").value,
+                yaw_deg=self.get_parameter("camera_yaw_deg").value,
             )
         else:
             self.camera = turtlebot3_burger_gazebo_camera()
@@ -211,6 +213,8 @@ class VisionDebugNode(Node):
         self.declare_parameter("camera_fovy_deg", 45.9857)
         self.declare_parameter("camera_mount_height", 0.133)
         self.declare_parameter("camera_pitch_deg", 15.0)
+        self.declare_parameter("camera_roll_deg", 0.0)
+        self.declare_parameter("camera_yaw_deg", 0.0)
         self.declare_parameter("roi_bottom_fraction", 0.3)
         self.declare_parameter("num_points", 30)
         self.declare_parameter("lookahead_distance", 0.20)

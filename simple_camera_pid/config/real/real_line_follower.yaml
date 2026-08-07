@@ -49,6 +49,19 @@
     camera_fovy_deg: 48.6867     # UNCONFIRMED as a real measurement -- see note above
     camera_mount_height: 0.133   # UNCONFIRMED as a real measurement -- see note above
     camera_pitch_deg: 15.0       # CONFIRMED 2026-08-03 against the real robot
+    camera_roll_deg: 0.0         # UNCONFIRMED (added 2026-08-07, no-op default) --
+    # mount roll about the optical axis. A 2026-08-07 session found a stable,
+    # low-noise heading_error/lateral_error bias with the robot stationary
+    # and centered on a straight line (heading_error ~+0.21 to +0.34 rad,
+    # lateral_error ~+0.01 to +0.02, drifted between separate sessions --
+    # suspected mount looseness, not measurement noise) that this and/or
+    # camera_yaw_deg below are meant to cancel. See
+    # turtlebot3_burger_real_camera()'s docstring (common/camera_geometry.py)
+    # for the calibration procedure -- do not guess a value here, measure it
+    # via /line_follower/local_path with the robot stationary.
+    camera_yaw_deg: 0.0          # UNCONFIRMED (added 2026-08-07, no-op default) --
+    # mount yaw about true-vertical; see camera_roll_deg's comment above and
+    # turtlebot3_burger_real_camera()'s docstring for calibration.
 
     # Vision thresholds -- min_brightness/max_saturation are the most likely
     # to need retuning for real ambient lighting (indoor fluorescent/LED vs.
@@ -78,6 +91,26 @@
     # actual filtering power without touching the line's own ~0.02. Both
     # derived from only two real frames (one clean, one mid-crash) -- re-tune
     # against a fuller real-track sample if false positives recur.
+    #
+    # 2026-08-07 MERGE NOTE -- READ BEFORE THE NEXT REAL RUN. The 170/0.20
+    # above and the kp: 0.7 below have NEVER RUN TOGETHER on the robot. The
+    # Pi was working from a branch point that predated the 170/0.20 change,
+    # so every kp run in that tuning log (2.0 -> 1.0 -> 1.5 -> 0.7) was
+    # driven with min_brightness=70 / max_saturation=0.30 -- i.e. with
+    # exactly the segmentation that this comment block documents as
+    # flagging ~half the ground as line-candidate. That means the
+    # "oscillation" those runs measured (0.70-0.78 steering-sign-flips/sec)
+    # may be partly or wholly the sliding window snapping between the real
+    # line and a false region, NOT underdamped control -- which would make
+    # kp: 0.7 a compensation for a bug that no longer exists here.
+    # So: re-run the kp sweep at 170/0.20 before trusting 0.7. If the
+    # oscillation is gone at 170/0.20, walk kp back UP toward 2.0 rather
+    # than keeping 0.7 (0.7 undershot real curves once already at
+    # min_brightness=70 -- see the kp comment below). To reproduce the Pi's
+    # exact last-tested configuration instead, set min_brightness: 70.0 /
+    # max_saturation: 0.30 here and leave kp at 0.7 -- but understand
+    # that combination is the one the 2026-08-04 bag analysis argues
+    # against.
     roi_bottom_fraction: 0.3
     num_points: 30
     lookahead_distance: 0.20
@@ -108,10 +141,41 @@
     # there's no proportional gradient left to self-correct, which is
     # exactly what caused a real spin-in-place incident that day (confirmed
     # via /line_follower/debug: wheel_left=-1.34, wheel_right=3.505 rad/s,
-    # frozen at max saturation). 2.0 pushes the saturation boundary out to
-    # |steering_error| > 0.5 -- re-tune from this run's data, not a
-    # validated final value either.
-    kp: 2.0
+    # frozen at max saturation).
+    #
+    # kp dropped 2.0 -> 1.0 on 2026-08-06: even after fixing the vision-side
+    # bugs (Hough seed bistability, undersized sliding window) and the
+    # lost-line speed decay, 2.0 still oscillated on real hardware --
+    # confirmed via /line_follower/debug: 0.70 steering-sign-flips/sec,
+    # never saturating (|wheel_diff| max 4.85, limit ~6.5+), so this is
+    # underdamped closed-loop control, not the earlier saturation-driven
+    # runaway. A no-PID pure-proportional diagnostic (same vision.py output,
+    # kp=0.5, no kd/recovery_gain/integral) tracked the same track cleanly
+    # at 0.08 flips/sec -- confirming the oscillation is from this
+    # controller's gain/damping, not the vision signal itself.
+    #
+    # kp=1.0 immediately re-tested same day: no oscillation this time, but
+    # undershot real curves and drove off-track (steering correction too
+    # weak/slow to keep up with the line's curvature) -- so 1.0 and 2.0
+    # bracket a working range without landing in it.
+    #
+    # kp=1.5 re-tested same day, twice: first run drove off-track and locked
+    # onto an unrelated white object elsewhere in the room as if it were the
+    # line (a separate bug from oscillation -- vision.py has no plausibility
+    # check rejecting a "found" detection that jumped far from the last
+    # known-good position, so once truly off the real track it will happily,
+    # confidently latch onto ANY white line-like shape in view; see that
+    # run's bag for the frame-by-frame confirmation). Retested with the
+    # room lights off (to rule out that object's reflectivity as a factor)
+    # and it stayed on-track this time, but still oscillated -- 0.78
+    # steering-sign-flips/sec, close to kp=2.0's 0.70, i.e. lights and the
+    # stray-object lock don't explain the oscillation itself. So 1.0-2.0
+    # doesn't contain a clean point either. Trying below 1.0 next (kd
+    # unchanged at 0.35 for this step -- isolate kp's own contribution
+    # first): 0.7, between the oscillating 1.0-2.0 range and the
+    # pure-proportional (no kd/recovery_gain/integral) diagnostic's clean
+    # 0.5.
+    kp: 0.7
     ki: 0.0
     kd: 0.35
     n_filter: 20.0

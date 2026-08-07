@@ -6,18 +6,20 @@ for the single-process alternative, or run the two split nodes directly for
 the actual control loop. This file only starts monitoring tools, no control
 loop of its own -- same division of labor as gazebo_monitor.launch.py.
 
-vision_debug_node CAN be started here (vision_debug:=true, the default),
-unlike the earlier version of this file which required running it on the Pi.
-Running it on the PC means it subscribes to the raw /camera/image_raw feed
-over the Pi<->PC WiFi link itself (the same tradeoff line_follower_vision_node
-was split off the control loop to avoid -- see that node's module docstring),
-so this is meant for a debug session, not left running during normal control
-loop operation. Set vision_debug:=false and run it on the Pi instead (next to
-the camera) if that WiFi cost is a problem:
+vision_debug_node normally runs ON THE PI, not here -- for the same reason
+line_follower_vision_node does (see that node's module docstring): subscribing
+to the raw camera feed from the PC over WiFi measured out at only ~1-2 Hz
+(2026-07-31), so running the vision computation remotely defeats the point of
+a live debug view. robot_bringup.launch.py starts it on the Pi by default
+(its own ``vision_debug:=true``), and this file on the PC just needs rviz2 (or
+an Image display) pointed at the resulting /vision_debug/image_raw/compressed
+topic -- which is exactly what rviz/real_monitor.rviz already does.
 
-    ros2 run simple_camera_pid vision_debug_node --ros-args \\
-        --params-file install/simple_camera_pid/share/simple_camera_pid/config/real/real_line_follower.yaml \\
-        -p platform:=real
+``vision_debug:=true`` here is kept only as an escape hatch for when the Pi
+can't run it (e.g. debugging the Pi-side install itself). It pays the full
+WiFi cost described above -- vision_debug_node's own subscription is to the
+RAW /camera/image_raw, so this is for a one-off debug session, never for a
+normal control-loop run. Default is false.
 
 This file uses rviz/real_monitor.rviz, NOT gazebo_monitor.rviz -- same
 layout (annotated image, pose, trajectory), minus the raw-camera Image
@@ -38,7 +40,7 @@ Usage
     ros2 launch simple_camera_pid real_monitor.launch.py
     ros2 launch simple_camera_pid real_monitor.launch.py plot:=false
     ros2 launch simple_camera_pid real_monitor.launch.py trajectory:=false
-    ros2 launch simple_camera_pid real_monitor.launch.py vision_debug:=false
+    ros2 launch simple_camera_pid real_monitor.launch.py vision_debug:=true
 
 Arguments
 ---------
@@ -57,9 +59,9 @@ Arguments
                 Launch vision_debug_node ON THE PC (platform:=real, reading
                 camera/vision params from config/real/real_line_follower.yaml)
                 publishing the annotated feed on /vision_debug/image_raw (+
-                /compressed sibling) (default true). See the module
-                docstring's WiFi-cost note before leaving this on during a
-                real control-loop run.
+                /compressed sibling). Default FALSE -- the Pi runs it via
+                robot_bringup.launch.py; see the module docstring's WiFi-cost
+                note before turning this on.
 """
 import os
 

@@ -13,6 +13,7 @@ import math
 from dataclasses import dataclass
 
 import numpy as np
+from scipy.spatial.transform import Rotation
 
 
 @dataclass(frozen=True)
@@ -36,6 +37,8 @@ class CameraParams:
     hough_max_peaks: int = 4        # platform-independent
     max_drift_per_row: float = 3.0  # platform-independent, a ratio (not px-scaled)
     max_ground_range: float = 5.0   # discard projections beyond this forward distance (m)
+    roll_deg: float = 0.0    # mount roll about the camera's forward/optical axis (deg), 0 = no roll
+    yaw_deg: float = 0.0     # mount yaw about the true-vertical axis (deg), 0 = no yaw
 
 
 def turtlebot3_burger_mujoco_camera() -> CameraParams:
@@ -154,6 +157,8 @@ def turtlebot3_burger_real_camera(
     fovy_deg: float,
     mount_height: float,
     pitch_deg: float = 0.0,
+    roll_deg: float = 0.0,
+    yaw_deg: float = 0.0,
 ) -> CameraParams:
     """Real TurtleBot3 Burger USB/CSI camera -- fill in from an actual measurement,
     not a simulator default.
@@ -166,6 +171,68 @@ def turtlebot3_burger_real_camera(
     ``mount_height``: camera optical center height above the ground plane (m),
     measured with a tape measure.
     ``pitch_deg``: downward tilt from horizontal (m), 0 if mounted level.
+    ``roll_deg``/``yaw_deg``: mount roll/yaw (degrees, 0 = none) -- see
+    ``_mount_rotation_matrix()``'s docstring for the exact rotation and sign
+    convention. Added 2026-08-07 after a real-hardware session found a
+    stable (low-noise, repeatable within one sitting) ``heading_error``/
+    ``lateral_error`` bias with the robot stationary and centered on a
+    straight line -- neither error should be nonzero in that pose if
+    ``pitch_deg``/``mount_height`` were the only mount-geometry unknowns, so
+    the remaining bias is attributed to roll/yaw the existing single-axis
+    model couldn't represent at all. Calibration procedure (no dedicated
+    tool in this repo -- matches this project's existing "measure live,
+    hardcode the number, comment it" convention, same as ``pitch_deg``'s
+    own history below):
+      1. Stand the robot stationary, centered and heading-aligned on a
+         straight track segment.
+      2. Run vision-only, zero connection to ``/cmd_vel`` (safe -- no motors
+         involved): ``ros2 run simple_camera_pid line_follower_vision_node
+         --ros-args --params-file <real_line_follower.yaml> -p
+         camera_roll_deg:=<guess> -p camera_yaw_deg:=<guess>``.
+      3. Sample ``/line_follower/local_path`` (``[steering_error,
+         lateral_error, heading_error, confidence, found]``) for a few
+         seconds; average.
+
+         2026-08-07 real-hardware finding: within one restart, samples are
+         very low-noise (stdev ~0.001-0.02 rad) -- but restarting the SAME
+         node with the SAME roll/yaw values can give a wildly different
+         reading next time (observed swings of ~0.5 rad / ~30deg between
+         back-to-back restarts at an identical ``camera_yaw_deg``). Root
+         cause: ``_hough_seed()`` has no ``prev_base_col`` to anchor to on a
+         fresh process's first frame, so it can lock onto either long edge
+         of the (real, non-zero-width) line -- see ``_hough_seed()``'s own
+         docstring in ``vision.py`` for that ambiguity. Whichever edge wins
+         on frame 1 then stays locked in (temporal continuity keeps it
+         there) for the rest of that run, so it looks perfectly stable
+         within a session while being essentially a coin flip across
+         restarts. **Do 2-3 fresh restarts per candidate value and use their
+         mean, not a single restart's reading** -- a single restart's number
+         is not trustworthy enough to coordinate-descend on. This is the
+         same bistability that caused this project's earlier real-robot
+         spin/wobble incidents (see ``_find_nearest_run``'s docstring) --
+         fixing ``_hough_seed`` to reject an implausible frame-1 seed (or to
+         average both edges instead of picking one) would remove the need
+         for multi-restart averaging here, but is a separate, bigger change
+         than this calibration procedure.
+      4. Coordinate descent: ``heading_error ~= radians(yaw_deg)`` when
+         centered (near-exact -- ``y_ground/x_ground = tan(yaw_deg)``), so
+         guess ``camera_yaw_deg = -degrees(heading_error)`` first, re-run,
+         and keep adjusting in whichever direction shrinks ``heading_error``
+         (flip the sign if it grows instead). Then do the same for
+         ``camera_roll_deg`` against ``lateral_error``. The two aren't
+         perfectly orthogonal (yaw leaks a little into lateral_error via
+         ``lookahead_distance*tan(yaw_deg)``; roll's contribution to
+         heading_error varies with row) so expect 2-3 rounds alternating
+         between them before both settle near the noise floor.
+      5. Repeat the whole procedure independently 2-3 times (re-square the
+         robot on the line each time). If the converged values drift
+         meaningfully between attempts, that's a loose mount (a mechanical
+         problem), not a calibration-precision problem -- fix the bracket
+         before trusting a number.
+      6. Once repeatable, hardcode into ``real_line_follower.yaml`` next to
+         ``camera_pitch_deg``, updating its comment from UNCONFIRMED to
+         CONFIRMED with the date and this method, mirroring
+         ``camera_pitch_deg``'s own CONFIRMED-2026-08-03 comment.
 
     The four pixel-scale constants (``window_half_width``, ``min_window_pixels``,
     ``hough_min_length``, ``hough_fill_gap``) describe real-world feature sizes
@@ -209,7 +276,56 @@ def turtlebot3_burger_real_camera(
         hough_fill_gap=20.0 * scale,
         default_roi=0.10,
         default_lookahead=0.20,
+        roll_deg=roll_deg,
+        yaw_deg=yaw_deg,
     )
+
+
+def _mount_rotation_matrix(p: CameraParams) -> np.ndarray:
+    """3x3 rotation R mapping a camera-frame ray ``(xc, yc, zc)`` (OpenCV
+    convention: x=right, y=down, z=forward/optical-axis) to mount-frame
+    ``(d_right, d_down, d_forward)``, i.e. ``R @ [xc, yc, zc]``.
+
+    Composed as ``R = R_yaw @ R_pitch @ R_roll`` -- roll innermost (a twist
+    about the camera module's own lens barrel, independent of how the
+    bracket is subsequently tilted), pitch next (this file's original
+    pitch-only rotation, unchanged), yaw outermost (how the whole
+    already-pitched bracket is clocked left/right relative to the chassis).
+    This order is a physically-motivated choice for a two-source mount
+    misalignment, not the only valid one -- but at ``roll_deg=yaw_deg=0.0``
+    both ``R_roll``/``R_yaw`` are exactly the identity regardless of where
+    they sit in the product, so ``R`` reduces to exactly the pitch matrix
+    below for *any* composition order: every existing deployment
+    (Gazebo/MuJoCo presets, this robot's own tuned ``pitch_deg``) keeps
+    today's exact behavior unchanged.
+
+    The pitch block is hand-rolled (not ``Rotation.from_euler('x', ...)``)
+    so it stays byte-identical to this file's original two-line trig --
+    scipy's quaternion-based composition differs from it by ~1 ULP at
+    nonzero angles, which is physically meaningless but pointless to
+    introduce into an otherwise-unchanged, already-tuned rotation.
+
+    Sign convention (with the robot centered/heading-aligned on the line,
+    so the line sits near the image's center column): positive
+    ``roll_deg`` produces a negative, roughly-distance-independent
+    ``lateral_error`` bias; positive ``yaw_deg`` produces a positive
+    ``heading_error`` bias that grows with lookahead distance (to close
+    approximation ``heading_error ~= radians(yaw_deg)`` when centered) --
+    see ``turtlebot3_burger_real_camera()``'s docstring for the calibration
+    procedure this is meant to cancel. If a first guess at either sign
+    makes the corresponding error grow instead of shrink, flip it -- this
+    was derived from the code above, not confirmed against the physical
+    mount, so getting the sign right on the first try isn't guaranteed.
+    """
+    roll = Rotation.from_euler("z", p.roll_deg, degrees=True).as_matrix()
+    ph = math.radians(p.pitch_deg)
+    pitch = np.array([
+        [1.0, 0.0, 0.0],
+        [0.0, math.cos(ph), math.sin(ph)],
+        [0.0, -math.sin(ph), math.cos(ph)],
+    ])
+    yaw = Rotation.from_euler("y", p.yaw_deg, degrees=True).as_matrix()
+    return yaw @ pitch @ roll
 
 
 def pixel_to_ground(u: np.ndarray, v: np.ndarray, p: CameraParams) -> tuple[np.ndarray, np.ndarray]:
@@ -231,10 +347,8 @@ def pixel_to_ground(u: np.ndarray, v: np.ndarray, p: CameraParams) -> tuple[np.n
     yc = (v - cy) / fy
     zc = np.ones_like(xc)
 
-    ph = math.radians(p.pitch_deg)
-    d_down = math.cos(ph) * yc + math.sin(ph) * zc
-    d_forward = -math.sin(ph) * yc + math.cos(ph) * zc
-    d_right = xc
+    R = _mount_rotation_matrix(p)
+    d_right, d_down, d_forward = R @ np.stack([xc, yc, zc], axis=0)
 
     with np.errstate(divide="ignore", invalid="ignore"):
         t = p.mount_height / d_down
@@ -265,14 +379,12 @@ def ground_to_pixel(x_ground: np.ndarray, y_ground: np.ndarray, p: CameraParams)
     cx = (p.image_width + 1) / 2
     cy = (p.image_height + 1) / 2
 
-    ph = math.radians(p.pitch_deg)
     d_forward = x_ground
     d_right = y_ground
     d_down = np.full_like(x_ground, p.mount_height)
 
-    yc = math.cos(ph) * d_down - math.sin(ph) * d_forward
-    zc = math.sin(ph) * d_down + math.cos(ph) * d_forward
-    xc = d_right
+    R = _mount_rotation_matrix(p)
+    xc, yc, zc = R.T @ np.stack([d_right, d_down, d_forward], axis=0)
 
     u = np.full_like(x_ground, np.nan)
     v = np.full_like(x_ground, np.nan)
