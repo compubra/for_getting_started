@@ -1,0 +1,21 @@
+# Layer 1 of 3 -- the vision pipeline alone.
+#
+# Everything `common/vision.py`, `common/camera_geometry.py`,
+# `common/debug_frame.py` and `common/random_path.py` import. This is the
+# whole dependency set for the Raspberry Pi in the split deployment
+# (`real/vision_node.py` + `common/vision_debug_node.py`): the Pi computes
+# vision and ships 5 floats, so it needs none of the RL stack below.
+#
+# Install into the same Python environment ROS2 uses:
+#   pip install -r requirements-vision.txt
+#
+# On this project's Pi these all came from apt instead (python3-numpy,
+# python3-scipy, python3-skimage, python3-opencv land in
+# /usr/lib/python3/dist-packages) -- check before pip-installing over them.
+#
+# The three layers are additive: requirements-residual.txt includes this
+# file, and requirements-sim.txt includes that one.
+numpy>=1.24
+scipy>=1.10
+opencv-python>=4.6
+scikit-image>=0.21

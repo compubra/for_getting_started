@@ -34,7 +34,7 @@ turtlebot3_mujoco_env.py`), the ROS node, and MuJoCo-specific tooling
 ## Install
 
 ```bash
-pip install -r ../../requirements-mujoco.txt
+pip install -r ../../requirements-sim.txt
 ```
 
 ## Layout
@@ -154,7 +154,7 @@ the archived MATLAB `.mat` agents) — all of that now lives under
 ## What was actually verified
 
 Everything below was executed, not just read for plausibility (in a scratch
-virtualenv with the full `requirements-mujoco.txt`, including `mujoco` and
+virtualenv with the full `requirements-sim.txt`, including `mujoco` and
 `stable-baselines3`, against the real scene files in `model/mujoco/`):
 
 - `../common/control/pid.py`'s discrete filtered-PID output matches MATLAB's `pid`

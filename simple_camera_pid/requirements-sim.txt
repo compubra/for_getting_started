@@ -1,0 +1,18 @@
+# Layer 3 of 3 -- the full simulation and training stack. Replaces the former
+# requirements-mujoco.txt (renamed 2026-08-08: the old name suggested it was
+# MuJoCo-specific when it was really "everything", which is why the Raspberry
+# Pi was never able to use it and ended up with a hand-slimmed fork of the
+# whole package instead of a dependency file it could actually install).
+#
+# Adds what `mujoco/` and `training/` need on top of policy inference:
+# physics + rendering (mujoco) and the training-curve plots (matplotlib).
+# PC/HPC only -- do not install this on the robot.
+#
+#   pip install -r requirements-sim.txt
+#
+# Not resolvable via rosdep/apt; install into the same Python environment
+# ROS2 uses.
+-r requirements-residual.txt
+
+mujoco>=3.1
+matplotlib>=3.6

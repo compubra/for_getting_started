@@ -1,0 +1,22 @@
+# Layer 2 of 3 -- vision, plus loading and running a trained residual policy.
+#
+# Adds what `common/residual_policy.py` needs at import/load time. Required on
+# whichever machine runs the control node with a non-empty
+# `residual_model_path`: the PC in the split deployment
+# (`real/control_node.py`), or wherever `gazebo_line_follower_node.py` /
+# `mujoco_line_follower_node.py` runs. NOT needed on the Pi -- see
+# requirements-vision.txt.
+#
+#   pip install -r requirements-residual.txt
+#
+# This is inference only. Training lives in requirements-sim.txt.
+-r requirements-vision.txt
+
+gymnasium>=0.29
+stable-baselines3>=2.2
+# torch arrives transitively via stable-baselines3; listed explicitly because
+# the CUDA variant matters and pip picks it from the default index. The HPC
+# (LSAC) env pins cu124 for that cluster's driver; on a local box install the
+# variant matching `nvidia-smi`'s CUDA version instead of pinning cu124 here.
+# For inference-only use on a CPU-only box the CPU wheel is enough.
+torch>=2.2

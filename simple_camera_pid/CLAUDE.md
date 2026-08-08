@@ -25,7 +25,26 @@ colcon build --packages-select simple_camera_pid
 source install/setup.bash
 ```
 
-MuJoCo dependencies are not rosdep-resolvable — `pip install -r requirements-mujoco.txt`.
+Python dependencies are not rosdep-resolvable and are layered by what a machine
+actually runs — each file includes the one above it, so install the deepest
+layer you need:
+
+| File | For | Adds |
+| --- | --- | --- |
+| `requirements-vision.txt` | the Pi (`real/vision_node.py`) | numpy, scipy, opencv-python, scikit-image |
+| `requirements-residual.txt` | the PC (`real/control_node.py` with a residual policy) | gymnasium, stable-baselines3, torch |
+| `requirements-sim.txt` | PC/HPC (MuJoCo + `training/`) | mujoco, matplotlib |
+
+ROS dependencies that only one machine can install (`ros_gz_sim` /
+`turtlebot3_gazebo` vs `camera_ros` / `turtlebot3_node` /
+`turtlebot3_bringup`) are declared in `package.xml` under format-3
+`condition` attributes, gated on `SIMPLE_CAMERA_PID_SIM=1` /
+`SIMPLE_CAMERA_PID_ROBOT=1`. Set exactly one per machine in `~/.bashrc`.
+**This is what lets one identical tree live on both machines** — do not
+re-introduce a slimmed copy of the package for the robot (that fork existed
+until 2026-08-08 and cost three days of uncommitted work; see that merge
+commit). `colcon build` never resolves `exec_depend`, so these affect only
+`rosdep install`.
 
 `README.md` (package root) is the authoritative file-by-file map, organized by
 deployment line (Gazebo / MuJoCo / real robot / training). Consult it before

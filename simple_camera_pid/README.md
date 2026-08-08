@@ -100,7 +100,8 @@ footprint even if the controller loses the line.
 | `simple_camera_pid/common/residual_policy.py` | 加载/运行训练好的 SAC/PPO 残差策略(推理用,三条控制线共用) |
 | `simple_camera_pid/common/random_path.py` | 纯几何参考曲线生成器,独立于任何平台 |
 | `simple_camera_pid/common/README.md` | 本目录设计说明 |
-| `package.xml`、`setup.py`、`README.md`(本文件)、`requirements-mujoco.txt`、`resource/simple_camera_pid` | 包元数据/构建配置 |
+| `package.xml`、`setup.py`、`README.md`(本文件)、`resource/simple_camera_pid` | 包元数据/构建配置 |
+| `requirements-vision.txt`、`requirements-residual.txt`、`requirements-sim.txt` | 分层 pip 依赖(逐层包含,按机器装最深那层) |
 | `tools/analyze_simple_track.py` | 赛道贴图分析工具 |
 
 ## Build
@@ -162,7 +163,7 @@ vision + PID internally on its own timer, publishing `/camera/image_raw`,
 Install its extra dependencies first (not resolvable via rosdep):
 
 ```bash
-pip install -r requirements-mujoco.txt
+pip install -r requirements-sim.txt
 ```
 
 Then, from the workspace root:

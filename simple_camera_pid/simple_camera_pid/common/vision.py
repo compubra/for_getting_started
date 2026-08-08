@@ -459,7 +459,7 @@ def _hough_seed(
     # seed keeps this deterministic frame-to-frame (matters for reproducible
     # simulation/RL rollouts -- the same camera frame must always seed the
     # same base_col/drift_per_row). The keyword was renamed seed->rng in a
-    # recent scikit-image release; requirements-mujoco.txt only pins
+    # recent scikit-image release; requirements-vision.txt only pins
     # scikit-image>=0.21, so support both.
     hough_kwargs = dict(
         threshold=10,
