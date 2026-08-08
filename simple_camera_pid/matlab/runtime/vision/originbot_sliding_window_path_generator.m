@@ -279,10 +279,19 @@ end
 function [winCols, winRows, winValid, nearPixelError] = slideWindows(mask, ...
     pathTop, baseCol, driftPerRow, windowCount, halfWidth, minWinPixels, ...
     centerX)
-%SLIDEWINDOWS 自底向上滑动窗口：逐窗取白线质心并重定中下一窗。
-%   winCols/winRows  各窗质心（列 / 全图行号）
-%   winValid         该窗是否有足量白像素
-%   nearPixelError   最近端有效窗质心的列偏差(px)，供 PID 即时反馈
+%SLIDEWINDOWS 自底向上滑动窗口：逐窗测出白线游程、取其中点并重定中下一窗。
+%   winCols/winRows  各窗中点（列 / 全图行号）
+%   winValid         该窗是否找到足量白像素的游程
+%   nearPixelError   最近端有效窗中点的列偏差(px)，供 PID 即时反馈
+%
+% 2026-08-08：由「固定 halfWidth 窗内像素质心」改为「逐行带测量游程取中点」，
+% 移植自 Python 侧 common/vision.py 的 _find_nearest_run/_slide_windows
+% （那边 2026-08-05 就改了，MATLAB 一直停在旧算法上）。原因是实测：640 宽真
+% 车帧上胶带线宽 130~161px，而 halfWidth=20 只有 40px 宽的搜索框，永远只能
+% 看到线的一小片，质心跟着那一片相对线的位置漂，逐帧在两条边之间跳——这是
+% 真车转圈/摆动事故的直接成因。改用实测游程自身的中点后，窗宽自适应每行的
+% 真实线宽，不再需要手调像素常数；halfWidth 降级为「防止跳到远处无关亮区」
+% 的搜索半径闸门，其取值同步在 originbot_camera_profile.m 里调大。
 roiHeight = size(mask, 1);
 imageWidth = size(mask, 2);
 windowHeight = max(2, floor(roiHeight / windowCount));
@@ -298,19 +307,17 @@ lastDelta = -windowHeight * driftPerRow;
 for w = 1:windowCount
     rowHigh = roiHeight - (w - 1) * windowHeight;   % 窗底(近)
     rowLow = max(1, rowHigh - windowHeight + 1);    % 窗顶(远)
-    colLow = max(1, round(currentCol - halfWidth));
-    colHigh = min(imageWidth, round(currentCol + halfWidth));
+    rowBand = mask(rowLow:rowHigh, :);              % 整行带，不再按 halfWidth 裁列
+    colMass = sum(rowBand, 1);
 
-    window = mask(rowLow:rowHigh, colLow:colHigh);
-    pixelCount = sum(window, "all");
-    if pixelCount >= minWinPixels
-        colMass = sum(window, 1);
-        rowMass = sum(window, 2);
-        centroidCol = colLow - 1 + ...
-            sum(colMass .* (1:numel(colMass))) / pixelCount;
+    [runLeft, runRight, pixelCount] = findNearestRun( ...
+        colMass, currentCol, halfWidth, minWinPixels);
+    if runLeft > 0
+        centroidCol = 0.5 * (runLeft + runRight);   % 游程中点，而非像素质心
+        rowMass = sum(rowBand(:, runLeft:runRight), 2);
         centroidRow = rowLow - 1 + ...
             sum(rowMass .* (1:numel(rowMass))') / pixelCount;
-        if w > 1 || winValid(1)
+        if w > 1
             lastDelta = centroidCol - currentCol;
         end
         currentCol = centroidCol;
@@ -328,6 +335,58 @@ if isempty(nearIdx)
     nearPixelError = 0;
 else
     nearPixelError = winCols(nearIdx) - centerX;
+end
+end
+
+
+function [left, right, pixelCount] = findNearestRun( ...
+    colMass, currentCol, searchRadius, minPixels)
+%FINDNEARESTRUN 在 currentCol ± searchRadius 内找像素数达标的连续亮列游程，
+% 优先取中点离 currentCol 最近的那条（时空连续性，防止跳到搜索带里另一块
+% 不相干的亮区）。返回 1-indexed 的 [left, right] 与该游程像素数；未找到
+% 时 left 返回 0。
+%
+% 2026-08-08 新增，移植自 Python 侧 common/vision.py 的 _find_nearest_run
+% （见 slideWindows 顶部注释里的移植缘由）。searchRadius 即原来的
+% halfWidth：现在只是「别跳太远」的闸门，不再是质心计算窗本身。
+width = numel(colMass);
+left = 0;
+right = 0;
+pixelCount = 0;
+
+lo = max(1, floor(currentCol - searchRadius));
+hi = min(width, ceil(currentCol + searchRadius));
+if hi < lo
+    return;
+end
+
+gated = colMass(lo:hi);
+lit = find(gated > 0);
+if isempty(lit)
+    return;
+end
+
+gaps = find(diff(lit(:)) > 1);
+runStarts = [1; gaps + 1];
+runEnds = [gaps; numel(lit)];
+
+bestDist = inf;
+for r = 1:numel(runStarts)
+    s = lit(runStarts(r));
+    e = lit(runEnds(r));
+    runPixels = sum(gated(s:e));
+    if runPixels < minPixels
+        continue;
+    end
+    absLeft = lo + s - 1;
+    absRight = lo + e - 1;
+    dist = abs(0.5 * (absLeft + absRight) - currentCol);
+    if dist < bestDist
+        bestDist = dist;
+        left = absLeft;
+        right = absRight;
+        pixelCount = runPixels;
+    end
 end
 end
 

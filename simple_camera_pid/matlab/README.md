@@ -58,20 +58,40 @@ workspace.assignin("TurtleBot3MuJoCoMap", "");
 `visual_line_follower_with_debug_real.slx` 的已知坑(详见其 InitFcn 指向的
 `runtime/init/configure_visual_line_follower_real_debug.m` 里的完整说明):
 
-1. `runtime/vision/originbot_camera_profile.m` 是按**像素总数**识别平台的
-   (MuJoCo 640×480×3、Gazebo 1920×1080×3),没有"真机"分支,而且这个函数
-   本身已经跟不上 2026-07-31 那次 Python 侧把 Gazebo 相机改成 800×600
-   的改动了——现在连 `_gazebo.slx` 大概率都会在这个函数里报
-   `UnknownCameraPlatform`。真机相机(树莓派 `camera_ros`,已确认 800×600)
-   跟这两个签名都对不上。这个函数是所有模型共用的,没有在本次改动里动它。
-2. `CmdVel_Publish` 现在配置的消息类型是 `geometry_msgs/Twist`。但从真机
-   `~/line_follower_bags/lap_20260731_152709` 录制的数据看,这台机器人
-   `ROS2 Jazzy` 版本的 `turtlebot3_node` 实际收发的 `/cmd_vel` 类型是
-   `geometry_msgs/msg/TwistStamped`(且里程计确实跟着那次录制的
-   TwistStamped 指令走了,说明真的是这个类型在生效)——纯 `Twist` 大概率
-   连不上真机的 `/cmd_vel` 订阅。这个坑同样存在于
-   `simple_camera_pid` 的 Python 真机节点(`line_follower_node.py`、
-   `real/control_node.py`),不是这个模型独有的。
+1. ~~`originbot_camera_profile.m` 没有真机分支~~ —— **2026-08-03 已修复**，该
+   函数改为必填 `platform` 参数(`'mujoco'|'gazebo'|'real'`)，`case 'real'`
+   存在且参数已与 Python 侧对齐。此条已过期，保留仅供追溯。
+
+2. **`CmdVel_Publish` 的消息类型仍是 `geometry_msgs/Twist`——这条仍然成立，
+   且是跑真机前的硬阻塞。** 从 `~/line_follower_bags/lap_20260731_152709`
+   录制的数据看，这台机器人 `ROS2 Jazzy` 的 `turtlebot3_node` 实际收发的
+   `/cmd_vel` 是 `geometry_msgs/msg/TwistStamped`，纯 `Twist` 连不上它的
+   订阅。**注意**：本条原文说"这个坑同样存在于 Python 真机节点"——**该说法
+   现已过时**，Python 侧 `real/line_follower_node.py` 与 `real/control_node.py`
+   都有 `cmd_vel_stamped` 参数可切换，MATLAB 是唯一还没解决的一侧。改这条
+   需要打开 `.slx` 改 Publish 块的消息类型，2026-08-08 这轮没做(当时没有
+   可用的 MATLAB 会话)。
+
+3. **视觉算法曾落后于 Python 侧一次关键修复——2026-08-08 已移植。** Python
+   在 `d05f008`(2026-08-05)把滑窗从「固定 halfWidth 窗内像素质心」改成
+   「逐行带测量白线游程、取游程中点」，起因是实测 640 宽真车帧上胶带线宽
+   130~161px，而当时 `WindowHalfWidth=20` 只有 40px 搜索框，只能看到线的
+   一小片，质心逐帧在两条边之间跳——**这就是真车转圈/摆动事故的直接成因**。
+   MATLAB 侧一直停在旧算法 + `WindowHalfWidth=20`，也就是说在 2026-08-08
+   之前，`visual_line_follower_with_debug_real.slx` 拿去跑真机会重现那些
+   事故。现已在 `originbot_sliding_window_path_generator.m` 里补上
+   `findNearestRun()` 并改写 `slideWindows()`，`WindowHalfWidth` 同步改为
+   gazebo/mujoco 30、real 180(与 Python 侧同名预设一致)。**该移植经
+   MATLAB-vs-Python 逐点交叉验证**(6 组合成掩膜 × 30 窗，见提交说明)。
+
+4. **MATLAB 与 Python 的真车参数一度各存一份并已漂移。** 2026-08-08 盘点：
+   `MinBrightness` 70 vs 170、`MaxSaturation` 0.30 vs 0.20、`ROIFraction`
+   0.10 vs 0.3，`Kp` 也不一致。新增
+   `runtime/init/load_real_params_from_yaml.m`，直接从
+   `config/real/real_line_follower.yaml`(真车运行时实际读的那份)读参数，
+   把它定为唯一真相源。**尚未接进 InitFcn**——
+   `configure_visual_line_follower_real_debug.m` 里那张硬编码 `defaults`
+   表还在用，接线需要在打开模型的情况下做。
 
 `visual_line_follower_sac_residual_real.slx` 额外的两条坑(详见其 InitFcn
 指向的 `runtime/init/configure_visual_line_follower_sac_residual_real_debug.m`):

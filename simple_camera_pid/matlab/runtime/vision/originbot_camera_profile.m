@@ -43,7 +43,11 @@ switch platform
         prof.FovyDeg     = 48.6867; % 2026-08-04 换 Pi Cam v2：SDF horizontal_fov=1.0855948 rad 按 4:3 换算
         prof.MountHeight = 0.133;   % 相机离地高度(m)
         prof.PitchDeg    = 15;      % 2026-08-04 恢复 15° 下俯，与真车/MuJoCo 一致
-        prof.WindowHalfWidth = 20;
+        % 2026-08-08：halfWidth 语义随 slideWindows 改算法而变——旧算法里它是
+        % 质心计算窗的半宽，新算法里只是「防止跳到远处无关亮区」的搜索半径
+        % 闸门（见 originbot_sliding_window_path_generator.m 的移植注释）。
+        % 取值与 Python 侧 common/camera_geometry.py 同名预设对齐。
+        prof.WindowHalfWidth = 30;
         prof.MinWindowPixels = 5;
         prof.HoughMinLength  = 40;
         prof.HoughFillGap    = 20;
@@ -62,7 +66,11 @@ switch platform
         prof.FovyDeg     = 48.6867; % MJCF <camera fovy>，垂直 FOV（2026-08-04 换 Pi Cam v2）
         prof.MountHeight = 0.133;   % 相机离地高度(m)
         prof.PitchDeg    = 15;      % 2026-08-04 恢复 15° 下俯，与真车一致
-        prof.WindowHalfWidth = 20;
+        % 2026-08-08：halfWidth 语义随 slideWindows 改算法而变——旧算法里它是
+        % 质心计算窗的半宽，新算法里只是「防止跳到远处无关亮区」的搜索半径
+        % 闸门（见 originbot_sliding_window_path_generator.m 的移植注释）。
+        % 取值与 Python 侧 common/camera_geometry.py 同名预设对齐。
+        prof.WindowHalfWidth = 30;
         prof.MinWindowPixels = 5;
         prof.HoughMinLength  = 40;
         prof.HoughFillGap    = 20;
@@ -87,7 +95,11 @@ switch platform
         prof.FovyDeg     = 48.6867; % Pi Cam v2 官方规格推导，未对真车单独标定
         prof.MountHeight = 0.133;   % 未对真车单独标定，沿用 Gazebo/MuJoCo 数值
         prof.PitchDeg    = 15;      % 2026-08-03 对真车实测确认：15° 下俯安装
-        prof.WindowHalfWidth = 20;
+        % 2026-08-08：halfWidth 语义随 slideWindows 改算法而变——旧算法里它是
+        % 质心计算窗的半宽，新算法里只是「防止跳到远处无关亮区」的搜索半径
+        % 闸门（见 originbot_sliding_window_path_generator.m 的移植注释）。
+        % 取值与 Python 侧 common/camera_geometry.py 同名预设对齐。
+        prof.WindowHalfWidth = 180;
         prof.MinWindowPixels = 5;
         prof.HoughMinLength  = 40;
         prof.HoughFillGap    = 20;
