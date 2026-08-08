@@ -62,7 +62,26 @@ class FilteredPID:
         saturated = min(self.out_max, max(self.out_min, unsaturated))
 
         # Back-calculation: feed the saturation error back into the integrator
-        # so it stops winding up once the output is clamped.
-        self._integrator = integrator_candidate + self.ts * self.kb * (saturated - unsaturated)
+        # so it stops winding up once the output is clamped. Only meaningful
+        # when ki != 0 -- with ki == 0 the integrator never accumulates
+        # anything of its own (ts*ki*error is always 0), so it's supposed to
+        # be permanently inert; applying the correction anyway still wrote a
+        # nonzero value into it on any saturation event, and since nothing
+        # with ki == 0 can ever unwind that value again, it leaked into
+        # every future output as a permanent bias (reproduced directly: a
+        # single saturating step left the steady-state output stuck at a
+        # nonzero constant forever after, even with the error at exactly 0).
+        #
+        # This matters on the real robot specifically: config/real/
+        # real_line_follower.yaml runs ki: 0.0, and the 2026-08-04 bag shows
+        # the wheel command pinned at saturation (wheel_left=-1.34,
+        # wheel_right=3.505 rad/s) -- i.e. exactly the condition that arms
+        # this leak. Found and fixed in the simulation copy of this file on
+        # 2026-08-07; ported here 2026-08-08, where it had been sitting
+        # unfixed the whole time.
+        if self.ki != 0.0:
+            self._integrator = integrator_candidate + self.ts * self.kb * (saturated - unsaturated)
+        else:
+            self._integrator = 0.0
 
         return saturated

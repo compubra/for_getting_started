@@ -33,7 +33,30 @@ class ControllerConfig:
     base_speed_scale: float = 0.03       # BaseSpeedScale
     max_angular_speed: float = 1.5       # MaxAngularSpeed, PID output saturation (rad/s)
     ts_control: float = 0.05             # Ts_Control (s), 20 Hz vision/control loop
-    recovery_gain: float = 10.0          # Recovery_Steering_Gain
+    # Recovery_Steering_Gain (MATLAB default was 10.0). Lowered to 1.0 after
+    # live diagnostics showed the line usually gets lost WHILE angular_cmd is
+    # already saturated at max_angular_speed (i.e. the robot is already
+    # turning as hard as it can right before losing sight of the line) -- at
+    # gain=10, any frozen pre-loss steering_error above recovery_limit/10 =
+    # 0.045 (essentially always; real errors were ~0.4-0.5) immediately
+    # re-saturates switched_steering at recovery_limit, so "recovery" was in
+    # practice always a full-effort turn in whatever direction the line was
+    # last seen drifting, regardless of how large that drift actually was --
+    # confirmed via a live example where the robot held angular_cmd pinned at
+    # -1.5 rad/s (right wheel at 0) for many consecutive ticks after losing
+    # the line. At gain=1.0 the recovery response is proportional to the same
+    # steering_error scale the already-tuned found-branch uses, only still
+    # hitting recovery_limit for genuinely large residual errors instead of
+    # nearly any nonzero one.
+    #
+    # Found and fixed in the simulation copy of this file on 2026-08-07;
+    # ported here 2026-08-08. It is a real improvement, NOT a complete fix --
+    # the recovery branch was never re-tuned end to end after this change.
+    # Deliberately kept alongside (not merged into) lost_speed_freeze_timeout/
+    # lost_speed_stop_timeout below, which came from the real robot and which
+    # the simulation copy still lacks: the two address different halves of the
+    # same incident (this one the steering magnitude, those the forward speed).
+    recovery_gain: float = 1.0           # Recovery_Steering_Gain
     recovery_limit: float = 0.45         # Recovery_Steering_Limit
     line_found_speed_gain: float = 0.8   # Line_Found_Speed_Gain
     min_search_speed_bias: float = 0.2   # Minimum_Search_Speed bias
