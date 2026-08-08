@@ -14,8 +14,9 @@ resolution:
 | ROS package root | `for_getting_started/src/simple_camera_pid/` | This package; also the default cwd for Claude Code sessions here. |
 
 `simple_camera_pid/model` is a **symlink to `for_getting_started/model/`** —
-outside the git repo, gitignored, and not distributable with the package. All
-Gazebo track SDFs and MuJoCo MJCF/textures live behind it.
+outside the git repo, gitignored, and not distributable with the package. The
+MuJoCo MJCF scenes and track textures live behind it. `model/gazebo/` is still
+there but is now dead weight — the Gazebo line was removed 2026-08-08.
 
 ## Build and run
 
@@ -35,11 +36,13 @@ layer you need:
 | `requirements-residual.txt` | the PC (`real/control_node.py` with a residual policy) | gymnasium, stable-baselines3, torch |
 | `requirements-sim.txt` | PC/HPC (MuJoCo + `training/`) | mujoco, matplotlib |
 
-ROS dependencies that only one machine can install (`ros_gz_sim` /
-`turtlebot3_gazebo` vs `camera_ros` / `turtlebot3_node` /
-`turtlebot3_bringup`) are declared in `package.xml` under format-3
-`condition` attributes, gated on `SIMPLE_CAMERA_PID_SIM=1` /
-`SIMPLE_CAMERA_PID_ROBOT=1`. Set exactly one per machine in `~/.bashrc`.
+ROS dependencies only the robot can install (`camera_ros`, `turtlebot3_node`,
+`turtlebot3_bringup`, needed by `launch/real/robot_bringup.launch.py`) are
+declared in `package.xml` under a format-3 `condition` gated on
+`SIMPLE_CAMERA_PID_ROBOT=1`; set that in the robot's `~/.bashrc` and leave it
+unset on the PC, whose remaining line (MuJoCo) needs no extra ROS packages at
+all. The `SIMPLE_CAMERA_PID_SIM` counterpart existed only for the Gazebo
+line's `ros_gz_sim`/`turtlebot3_gazebo` and went away with it.
 **This is what lets one identical tree live on both machines** — do not
 re-introduce a slimmed copy of the package for the robot (that fork existed
 until 2026-08-08 and cost three days of uncommitted work; see that merge
@@ -47,7 +50,7 @@ commit). `colcon build` never resolves `exec_depend`, so these affect only
 `rosdep install`.
 
 `README.md` (package root) is the authoritative file-by-file map, organized by
-deployment line (Gazebo / MuJoCo / real robot / training). Consult it before
+deployment line (MuJoCo / real robot / training). Consult it before
 guessing which file belongs to which line. Per-directory design notes live in
 `simple_camera_pid/{common,mujoco,training}/README.md`.
 
@@ -71,10 +74,13 @@ shared verbatim by all four lines:
 
 The lines on top:
 
-- **Gazebo** (`gazebo/gazebo_line_follower_node.py`) — subscribes to real
-  camera topics. This same node is also the **single-process real-robot
-  deployment**; `camera_profile:=gazebo|real` swaps camera geometry and the
-  node is otherwise agnostic to the image source.
+- **Real robot, single-process** (`real/line_follower_node.py`) — vision +
+  PID + `/cmd_vel` in one node, subscribing to a real camera topic. Lived at
+  `gazebo/gazebo_line_follower_node.py` until 2026-08-08, when the Gazebo
+  line was deleted and this node — which had always doubled as the real
+  robot's single-process deployment — moved here. `camera_profile` now
+  defaults to `real`; the `gazebo` value survives only as a fixed 640x480
+  `CameraParams` preset with nothing left to launch against it.
 - **MuJoCo** (`mujoco/mujoco_line_follower_node.py`) — runs physics, camera
   render, vision, and PID *inside its own timer*. Published `/camera/image_raw`,
   `/odom`, `/cmd_vel` are **diagnostics for rviz/rqt only; the control loop is
@@ -113,8 +119,9 @@ is a silent shape mismatch, not a clear error.
 ## Non-obvious constraints
 
 - **Hardcoded absolute workspace paths are intentional.** `KNOWN_WORKSPACE_ROOT`
-  / `KNOWN_WORKSPACE_TRACKS_PATH` in `mujoco/mujoco_line_follower_node.py`,
-  `launch/mujoco/mujoco_line_follower.launch.py`, and the Gazebo launch files
+  / `KNOWN_WORKSPACE_TRACKS_PATH` in `mujoco/mujoco_line_follower_node.py`
+  and `launch/mujoco/mujoco_line_follower.launch.py` (the Gazebo launch files
+  carried the same pattern until they were deleted 2026-08-08)
   are layer 1 of a three-layer fallback (hardcoded → search upward from cwd for
   a `model/` marker → walk up from the installed file location). They exist
   because `colcon build --symlink-install` silently degrades to copying on

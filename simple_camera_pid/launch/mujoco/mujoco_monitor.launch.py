@@ -6,7 +6,7 @@ monitoring tools, no simulation or controller:
     ros2 launch simple_camera_pid mujoco_line_follower.launch.py use_viewer:=false
     ros2 launch simple_camera_pid mujoco_monitor.launch.py
 
-Mirrors gazebo_monitor.launch.py (see that file for the full rationale of
+Mirrors the since-deleted gazebo_monitor.launch.py (see git history for the full rationale of
 each piece); the only MuJoCo-specific differences are the diagnostic topic
 default, vision_debug_node's platform/image-size/lookahead params (so its
 independent LineFollowerVision instance matches the MuJoCo camera instead of

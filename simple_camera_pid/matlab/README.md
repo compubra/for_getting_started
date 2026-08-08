@@ -70,7 +70,7 @@ workspace.assignin("TurtleBot3MuJoCoMap", "");
    `geometry_msgs/msg/TwistStamped`(且里程计确实跟着那次录制的
    TwistStamped 指令走了,说明真的是这个类型在生效)——纯 `Twist` 大概率
    连不上真机的 `/cmd_vel` 订阅。这个坑同样存在于
-   `simple_camera_pid` 的 Python 真机节点(`gazebo_line_follower_node.py`、
+   `simple_camera_pid` 的 Python 真机节点(`line_follower_node.py`、
    `real/control_node.py`),不是这个模型独有的。
 
 `visual_line_follower_sac_residual_real.slx` 额外的两条坑(详见其 InitFcn
@@ -81,7 +81,7 @@ workspace.assignin("TurtleBot3MuJoCoMap", "");
    workspace 里手动加载一个训练好的 agent 并赋给这个变量名(参考
    `train/sac/train_sac_residual_live.m`),不然仿真一开始就会报错。
 4. 项目里现有的所有训练好的 agent(`train/sac/` 自己的产物,以及
-   `launch/gazebo/gazebo_line_follower.launch.py` 里
+   `launch/gazebo/gazebo_line_follower.launch.py`(2026-08-08 已随 Gazebo 线删除)里
    `DEFAULT_RESIDUAL_MODEL_PATH` 指向的 hpc/0720-0724 sweep checkpoint)
    全部是纯仿真里训练出来的,没有一个在真机上跑过、更没验证过
    sim-to-real 是否可信。真要往这个模型里塞真车用的 `trainedAgent`,先按

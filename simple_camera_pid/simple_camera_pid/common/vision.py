@@ -138,7 +138,7 @@ class LineFollowerVision:
     camera: CameraParams = field(default_factory=turtlebot3_burger_mujoco_camera)
     roi_widen_step: float = 0.2
     """2026-07-29 adaptive-ROI fallback. Root cause (see
-    config/gazebo/gazebo_line_follower.yaml's comment history): a single
+    the since-removed config/gazebo yaml's comment history): a single
     static ``roi_bottom_fraction`` cannot serve every map/camera combination
     -- Gazebo's default (0.30) left the line sitting mostly ABOVE the ROI's
     far edge on gentle-curve maps like ``ellipse`` (measured found_rate
@@ -165,7 +165,7 @@ class LineFollowerVision:
     below 0.95 so the widened attempt still can't reach up into the region
     that misdetected Gazebo's oversized default ground_plane as the line
     before this project's per-track boundary curbs existed (see
-    track_bringup.launch.py's docstring); the curbs make that less likely
+    the since-deleted track_bringup.launch.py's docstring); the curbs make that less likely
     now, but there's no reason to widen past what was actually validated."""
     flip_vertical: bool = True
     """MuJoCo's raw OpenGL framebuffer (what the Simulink MuJoCo Plant block
@@ -173,7 +173,7 @@ class LineFollowerVision:
     original MATLAB function. The official ``mujoco`` Python bindings'
     ``Renderer.render()`` and ROS ``sensor_msgs/Image`` frames are already
     conventional top-row-first, so callers using either (see
-    ``mujoco/sim/turtlebot3_mujoco_env.py``, ``gazebo/gazebo_line_follower_node.py``)
+    ``mujoco/sim/turtlebot3_mujoco_env.py``, ``gazebo/line_follower_node.py``)
     construct this class with ``flip_vertical=False``, independent of
     ``camera.needs_flip`` (which documents the *MATLAB* raw-framebuffer fact,
     not this Python image source's own orientation)."""

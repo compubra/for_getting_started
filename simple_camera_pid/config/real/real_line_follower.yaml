@@ -1,6 +1,6 @@
 # Real-hardware parameters. Covers three deployment shapes that all share the
 # same vision/camera/PID tuning:
-#   - gazebo_line_follower_node: single-node, vision+PID in one process
+#   - line_follower_node: single-node, vision+PID in one process
 #     (see launch/real/real_line_follower.launch.py). Run this on whichever
 #     machine has the camera topic reachable -- it's network-agnostic.
 #   - line_follower_vision_node + line_follower_control_node: the split
@@ -198,9 +198,9 @@
     max_angular_speed: 1.0
 
     # This project's real TurtleBot3's turtlebot3_node subscribes to
-    # TwistStamped, not plain Twist (Gazebo's ros_gz_bridge wants plain
+    # TwistStamped, not plain Twist (the since-removed Gazebo ros_gz_bridge wanted plain
     # Twist instead -- see cmd_vel_stamped's comment in
-    # gazebo_line_follower_node.py/control_node.py). Confirmed 2026-07-31:
+    # line_follower_node.py/control_node.py). Confirmed 2026-07-31:
     # publishing plain Twist against this robot silently never reached
     # turtlebot3_node at all (different msg type on the same topic name, no
     # error, robot just never moved).
@@ -216,8 +216,8 @@
     residual_use_wheel_speed_obs: false
     residual_use_2d_action: false
 
-# --- Single-node deployment (gazebo_line_follower_node, real_line_follower.launch.py) ---
-gazebo_line_follower_node:
+# --- Single-node deployment (line_follower_node, real_line_follower.launch.py) ---
+line_follower_node:
   ros__parameters:
     # Matches ~/camera_ros_ws on the Pi (christianrauch/camera_ros wrapping
     # libcamera): its launch file remaps image_view's viewer to
@@ -228,12 +228,12 @@ gazebo_line_follower_node:
     #   ros2 topic echo <topic> --field encoding   # must be rgb8/bgr8/rgba8/bgra8
     image_topic: /camera/image_raw
     cmd_vel_topic: /cmd_vel
-    diagnostic_topic: /gazebo_line_follower/debug
+    diagnostic_topic: /line_follower/debug
 
 # --- Split deployment: vision_node runs on the Pi (next to the camera) ---
 line_follower_vision_node:
   ros__parameters:
-    image_topic: /camera/image_raw    # see the note under gazebo_line_follower_node above
+    image_topic: /camera/image_raw    # see the note under line_follower_node above
     local_path_topic: /line_follower/local_path
 
 # --- Split deployment: control_node runs on the PC ---

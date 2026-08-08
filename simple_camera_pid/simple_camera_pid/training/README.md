@@ -15,7 +15,7 @@ through `../mujoco/sim/turtlebot3_mujoco_env.py`'s physics+vision+PID loop.
 | `plotting.py` | Reads back a `monitor.csv` and plots the training curve |
 | `sac_training_config.py`, `ppo_training_config.py` | Hyperparameters -- edit these to tune training |
 | `train_sac_residual.py`, `train_ppo_residual.py` | Training entry points (`ros2 run simple_camera_pid mujoco_train_sac`/`mujoco_train_ppo`, or `python3 -m simple_camera_pid.training.train_sac_residual`) |
-| `hpc_scripts/` | Standalone HPC-cluster training scripts (`lsac`-based external package, **not vendored in this repo** -- these are meant to be copied to a cluster where `lsac` exists, not run here). Trains a 7-D-observation variant (adds normalized wheel-speed feedback) -- see `hpc_scripts/train_sac_residual.py`'s docstring for the exact spec if you need to load one of these checkpoints for inference (`mujoco_line_follower_node`'s/`gazebo_line_follower_node`'s `residual_use_wheel_speed_obs:=true`) |
+| `hpc_scripts/` | Standalone HPC-cluster training scripts (`lsac`-based external package, **not vendored in this repo** -- these are meant to be copied to a cluster where `lsac` exists, not run here). Trains a 7-D-observation variant (adds normalized wheel-speed feedback) -- see `hpc_scripts/train_sac_residual.py`'s docstring for the exact spec if you need to load one of these checkpoints for inference (`mujoco_line_follower_node`'s/`line_follower_node`'s `residual_use_wheel_speed_obs:=true`) |
 
 ## Quick start
 

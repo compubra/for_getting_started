@@ -3,7 +3,7 @@
 Code shared between the MuJoCo (`../mujoco/`) and Gazebo (`../gazebo/`)
 line-follower pipelines. Everything here started life under `mujoco/` (the
 package this repo's port work began with) and moved here once
-`gazebo_line_follower_node.py` started reusing it unchanged against real
+`line_follower_node.py` started reusing it unchanged against real
 Gazebo camera frames instead of its own separate implementation.
 
 ## Layout
@@ -31,6 +31,6 @@ by both platforms and auto-detecting which one it's looking at, and the two
 old algorithms are archived under `matlab/archive/archive_vision_scheme_a/`.
 This module (`vision.py`, `LineFollowerVision`) mirrors that: both
 `mujoco_line_follower_node.py` and
-`gazebo_line_follower_node.py`/`vision_debug_node.py` construct the same
+`line_follower_node.py`/`vision_debug_node.py` construct the same
 class, just with different `camera_geometry` presets and `flip_vertical`
 settings, and there is no separate Gazebo-only vision module anymore.

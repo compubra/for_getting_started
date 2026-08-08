@@ -1,42 +1,32 @@
 # Simple Camera PID
 
-This package drives a camera-based TurtleBot3 Burger line follower in Gazebo
-and MuJoCo: a PID controller (`common/control/`) on the vision pipeline's
-steering/lateral/heading error (`common/vision.py`), with an optional trained
-SAC/PPO residual policy layered on top.
+This package drives a camera-based TurtleBot3 Burger line follower on a real
+robot and in MuJoCo: a PID controller (`common/control/`) on the vision
+pipeline's steering/lateral/heading error (`common/vision.py`), with an
+optional trained SAC/PPO residual policy layered on top.
 
-7 tracks are available (`simple`, `complex`, `ellipse`, `training`,
+7 tracks are available for MuJoCo (`simple`, `complex`, `ellipse`, `training`,
 `track_easy`, `track_medium`, `track_hard`), each a self-contained model under
-`model/gazebo/tracks/` (Gazebo) / `model/mujoco/turtlebot3/` (MuJoCo), with a
-low boundary curb around the 4.4 m edge so the robot can't drive off the track
-footprint even if the controller loses the line.
+`model/mujoco/turtlebot3/`, with a low boundary curb around the 4.4 m edge so
+the robot can't drive off the track footprint even if the controller loses the
+line.
 
-> 2026-07-28: the original `simple_camera_pid_node` baseline (its own
-> `image_line_detector.py` vision code, tuned years ago for a since-replaced
-> Gazebo world) has been removed — it misdetected that world's own oversized
-> default `ground_plane` as the line and drove straight through curves. The
-> `common/vision.py`-based pipeline below (shared with MuJoCo) replaces it and
-> does not have that failure mode.
+> 2026-08-08: the **Gazebo deployment line was removed** — `gazebo/`,
+> `config/gazebo/`, `launch/gazebo/`, `worlds/` and `rviz/gazebo_monitor.rviz`
+> are gone, along with the `ros_gz_sim`/`turtlebot3_gazebo` dependencies.
+> Simulation is MuJoCo only now. The one file that had to survive is the
+> single-process control node: it was always both the Gazebo node *and* the
+> real robot's single-process deployment, so it moved to
+> `simple_camera_pid/real/line_follower_node.py` (executable
+> `line_follower_node`, was `gazebo_line_follower_node`) and its
+> `camera_profile` default flipped `gazebo` -> `real`. Nothing about the
+> vision or control algorithm changed.
 
-## 文件分类一览(按用途:Gazebo / MuJoCo / 真车 / 训练 / 通用)
+## 文件分类一览(按用途:MuJoCo / 真车 / 训练 / 通用)
 
-这份包里同时装着仿真(Gazebo、MuJoCo)、真实 TurtleBot3、RL 训练四条线,共用同一套
-`common/` 视觉+PID 代码。下表是当前实际目录结构(2026-07-31)按用途分类,方便按需
-定位文件——不确定某个文件属于哪条线时先查这里,而不是猜文件名。
-
-### Gazebo 专用
-
-| 路径 | 用途 |
-| --- | --- |
-| `config/gazebo/gazebo_line_follower.yaml` | PID/视觉参数(800x600 Gazebo 相机) |
-| `config/gazebo/ros_gz_bridge_turtlebot3.yaml` | `ros_gz_bridge` 话题映射 |
-| `launch/gazebo/track_world.launch.py` | 起 Gazebo 世界 + 生成机器人 |
-| `launch/gazebo/track_bringup.launch.py` | world + controller 一起起(`controller:=false` 只起 world) |
-| `launch/gazebo/gazebo_line_follower.launch.py` | 只起控制节点(`camera_profile:=real` 时其实是真车用这个) |
-| `launch/gazebo/gazebo_monitor.launch.py` | rviz 监控(annotated 相机 + 轨迹) |
-| `simple_camera_pid/gazebo/gazebo_line_follower_node.py` | 控制节点本体——**也是真车用的同一个节点**,见下方"真车"分类 |
-| `worlds/track_camera_world.sdf` | Gazebo 世界文件 |
-| `rviz/gazebo_monitor.rviz` | rviz 配置 |
+这份包里同时装着 MuJoCo 仿真、真实 TurtleBot3、RL 训练三条线,共用同一套
+`common/` 视觉+PID 代码。下表是当前实际目录结构按用途分类,方便按需定位文件——
+不确定某个文件属于哪条线时先查这里,而不是猜文件名。
 
 ### MuJoCo 专用
 
@@ -60,11 +50,14 @@ footprint even if the controller loses the line.
 | `simple_camera_pid/common/camera_geometry.py` 里的 `turtlebot3_burger_real_camera()` | 真实相机几何标定函数(FOV/安装高度/俯仰角需实测填入) |
 | `simple_camera_pid/real/vision_node.py` | 拆分部署的视觉半节点——跑在**树莓派**上,订阅相机原始帧,只把 `steering_error`/`lateral_error`/`heading_error`/`confidence`/`found` 这 5 个浮点数发到 `/line_follower/local_path`,不发原始图像 |
 | `simple_camera_pid/real/control_node.py` | 拆分部署的控制半节点——跑在 **PC** 上,订阅上面那 5 个浮点数,跑 PID(+可选残差 RL),发布 `/cmd_vel`;带网络掉线看门狗(`watchdog_timeout`,默认 1s 没收到新消息就当作丢线处理,不会一直重放旧指令) |
+| `simple_camera_pid/real/line_follower_node.py` | 单进程部署的控制节点(视觉+PID+可选残差策略都在一个进程里)。2026-08-08 前它是 `gazebo/gazebo_line_follower_node.py`,同时充当 Gazebo 节点和真车单进程节点 |
 | `simple_camera_pid/real/local_path_msg.py` | 上面两个节点之间的消息打包/解包(`Float32MultiArray`,没有单独开 `.msg` 接口包) |
+| `launch/real/robot_bringup.launch.py` | 树莓派上一把起相机驱动 + 底盘驱动 + 视觉调试叠加(取代旧的 `~/start_robot.sh`) |
+| `launch/real/real_monitor.launch.py` | PC 上的 rviz 监控(标注图像 + 位姿 + 轨迹 + 速度曲线) |
 
 真车有**两种部署方式**,共用同一份 `common/` 视觉+PID 代码和同一份 `real_line_follower.yaml`:
 
-- **单进程**(`gazebo_line_follower_node.py` + `real_line_follower.launch.py`):视觉+PID 在同一个节点里,跑在哪台机器都行,只要那台机器能订阅到相机话题。靠 `camera_profile` 参数(`gazebo`/`real`)切换相机几何来源,节点本身对图像来自 Gazebo 插件还是真实相机驱动是无感的。
+- **单进程**(`line_follower_node.py` + `real_line_follower.launch.py`):视觉+PID 在同一个节点里,跑在哪台机器都行,只要那台机器能订阅到相机话题。`camera_profile` 默认 `real`,从 yaml 里实测的 FOV/安装高度/俯仰/横滚/偏航构造相机几何;`gazebo` 是 Gazebo 线删除后残留的一个固定 640x480 预设,已无对应的启动方式。节点本身对图像来自哪个相机驱动是无感的。
 - **拆分**(`vision_node.py` 在树莓派 + `control_node.py` 在 PC):树莓派本地算视觉(不用把 800x600 原始 RGB 图像走 WiFi 传给 PC,那个带宽扛不住),只把 5 个浮点数传过去;PC 只算 PID/RL,把结果传回来给树莓派的 `turtlebot3_node` 转电机。两台机器之间只靠 ROS2 话题(DDS)通信,`ROS_DOMAIN_ID` 一致即可,不用额外写传输代码。
 
 ### 训练专用(RL 训练,不参与在线控制)
@@ -86,18 +79,18 @@ footprint even if the controller loses the line.
 > `setup.py` 的 `find_packages()` 里排除(不会被打包/安装),但文件本身还在磁盘上,
 > 建议确认无用后手动删除。
 
-### 通用(Gazebo / MuJoCo / 真车三条线共用)
+### 通用(MuJoCo / 真车两条线共用)
 
 | 路径 | 用途 |
 | --- | --- |
-| `simple_camera_pid/common/camera_geometry.py` | 针孔相机 + IPM 投影,三个平台的 `CameraParams` 预设(`mujoco`/`gazebo`/`real`) |
+| `simple_camera_pid/common/camera_geometry.py` | 针孔相机 + IPM 投影,`CameraParams` 预设(`mujoco`/`real`,外加保留的 `gazebo` 固定预设) |
 | `simple_camera_pid/common/config.py` | 共享默认参数(`RobotConfig`/`ControllerConfig`/`VisionConfig` 等) |
 | `simple_camera_pid/common/vision.py` | 循线视觉算法(霍夫种子 + 滑动窗口 + 地面二次拟合) |
 | `simple_camera_pid/common/control/pid.py`、`control/line_follower_controller.py` | 滤波 PID + 恢复转向 + 差速运动学 |
 | `simple_camera_pid/common/debug_frame.py` | 视觉调试叠加画面渲染 |
 | `simple_camera_pid/common/vision_debug_node.py` | 可视化视觉链路的 ROS 节点,`platform:=gazebo/mujoco/real` |
 | `simple_camera_pid/common/trajectory_path_node.py` | 发布行驶轨迹供 rviz 显示 |
-| `simple_camera_pid/common/residual_policy.py` | 加载/运行训练好的 SAC/PPO 残差策略(推理用,三条控制线共用) |
+| `simple_camera_pid/common/residual_policy.py` | 加载/运行训练好的 SAC/PPO 残差策略(推理用,各控制节点共用) |
 | `simple_camera_pid/common/random_path.py` | 纯几何参考曲线生成器,独立于任何平台 |
 | `simple_camera_pid/common/README.md` | 本目录设计说明 |
 | `package.xml`、`setup.py`、`README.md`(本文件)、`resource/simple_camera_pid` | 包元数据/构建配置 |
@@ -113,33 +106,33 @@ colcon build --packages-select simple_camera_pid
 source install/setup.bash
 ```
 
-## Run the controller (Gazebo)
+## Run the controller (real TurtleBot3)
+
+On the robot (Raspberry Pi) — camera driver, base driver, vision overlay:
 
 ```bash
-# World + robot + pure PID controller (no RL) on track_hard
-ros2 launch simple_camera_pid track_bringup.launch.py map:=track_hard
-
-# Simulation only, bring your own controller
-ros2 launch simple_camera_pid track_bringup.launch.py map:=complex controller:=false
-
-# With a trained SAC residual policy on top of the PID
-ros2 launch simple_camera_pid track_bringup.launch.py \
-    map:=track_hard residual_model_path:=/path/to/sac_agent.zip
+ros2 launch simple_camera_pid robot_bringup.launch.py
 ```
 
-`track_bringup.launch.py` composes `track_world.launch.py` (Gazebo + track +
-spawned robot) and `gazebo_line_follower.launch.py` (the controller node,
-`residual_model_path:=''` by default = pure PID). Call
-`gazebo_line_follower.launch.py` directly instead if you want its own
-best-checkpoint default (see that file's docstring).
-
-Useful first tuning knobs are in `config/gazebo/gazebo_line_follower.yaml`
-(PID gains, vision ROI/lookahead/gains, robot kinematics). For a live view of
-what the controller sees while tracking (annotated camera feed, pose trail,
-commanded-vs-measured velocity), run alongside:
+Then either deployment shape. Split (vision on the Pi, control on the PC):
 
 ```bash
-ros2 launch simple_camera_pid gazebo_monitor.launch.py
+ros2 run simple_camera_pid line_follower_vision_node --ros-args --params-file <config/real/real_line_follower.yaml>   # Pi
+ros2 run simple_camera_pid line_follower_control_node --ros-args --params-file <config/real/real_line_follower.yaml>  # PC
+```
+
+Or single-process, on whichever machine can reach the camera topic:
+
+```bash
+ros2 launch simple_camera_pid real_line_follower.launch.py
+```
+
+All tuning knobs live in `config/real/real_line_follower.yaml` — its `/**:`
+section is shared by every node name, so PID gains and vision/camera geometry
+are edited once, not per deployment shape. For a live view while tracking:
+
+```bash
+ros2 launch simple_camera_pid real_monitor.launch.py
 ```
 
 ## Analyze the texture
@@ -148,14 +141,13 @@ ros2 launch simple_camera_pid gazebo_monitor.launch.py
 python3 <package-source>/tools/analyze_simple_track.py
 ```
 
-## MuJoCo line follower (self-contained, no Gazebo)
+## MuJoCo line follower (self-contained simulation)
 
 `simple_camera_pid/mujoco/` is a Python port of the workspace's `matlab/`
 TurtleBot3 visual-line-follower work package (MuJoCo physics, pure-pursuit
 vision, PID, and SAC/PPO residual RL) — see
 `simple_camera_pid/mujoco/README.md` for the full design notes and what was
-verified against MATLAB. It runs independently of the Gazebo-based baseline
-above: `mujoco_line_follower_node` drives MuJoCo physics + camera render +
+verified against MATLAB. `mujoco_line_follower_node` drives MuJoCo physics + camera render +
 vision + PID internally on its own timer, publishing `/camera/image_raw`,
 `/odom`, `/cmd_vel`, and a diagnostics topic purely for rqt/rviz visibility
 (the control loop is closed inside the node, not over these topics).

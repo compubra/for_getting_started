@@ -2,7 +2,7 @@
 """ROS2 node: republishes accumulated /odom poses as a nav_msgs/Path.
 
 RViz2's stock Odometry display (rviz_default_plugins/Odometry, used in
-rviz/gazebo_monitor.rviz and rviz/mujoco_line_follower.rviz) only draws
+rviz/real_monitor.rviz and rviz/mujoco_line_follower.rviz) only draws
 discrete Arrow or Axes markers, one per kept message -- there is no
 "continuous line" shape in that plugin. With Keep set high enough to show
 useful history it reads as a trail of (by default red) arrows, not a
@@ -11,7 +11,7 @@ draws a connected line through a pose sequence, but it needs something
 publishing nav_msgs/Path -- neither line-follower node does, since their
 own control loops only need the latest pose. This node is that something:
 platform-agnostic (subscribes to whatever nav_msgs/Odometry topic it's
-pointed at, works identically for gazebo_line_follower_node's or
+pointed at, works identically for line_follower_node's or
 mujoco_line_follower_node's /odom), stateless beyond the capped pose
 history below.
 

@@ -1,19 +1,31 @@
 #!/usr/bin/env python3
-"""ROS2 node: SAC/PPO-residual (or plain-PID) TurtleBot3 line follower for Gazebo.
+"""ROS2 node: SAC/PPO-residual (or plain-PID) TurtleBot3 line follower, single-process.
+
+Vision + PID (+ optional residual policy) + ``/cmd_vel`` all inside one node,
+driven by whatever publishes ``image_topic``. The split alternative is
+``vision_node.py`` (on the Pi) + ``control_node.py`` (on the PC) -- use that
+when the camera and the controller need to live on different machines; use
+this when one machine can see the camera topic and drive the robot.
 
 Runs the same controller family as mujoco_line_follower_node.py
 (``common.control.line_follower_controller.LineFollowerController``, and the
 same residual-model observation spec via ``residual_use_wheel_speed_obs``),
 and the same vision algorithm too: ``common.vision.LineFollowerVision``
-(Hough-seed + sliding-window + ground-quadratic-fit -- the algorithm shared
-by both platforms since MATLAB's 2026-07-22 vision unification, see
-``common/vision.py``'s module docstring), applied to real Gazebo camera
-frames instead of an internally-rendered MuJoCo frame, using the Gazebo
-camera's own geometry (640x480, horizontal FOV, via
-``turtlebot3_burger_gazebo_camera()``). Drives the robot for real via
-``/cmd_vel`` instead of stepping an internal physics env.
+(Hough-seed + sliding-window + ground-quadratic-fit, shared by every platform
+since MATLAB's 2026-07-22 vision unification -- see ``common/vision.py``'s
+module docstring).
 
-The stock Gazebo camera publishes at 30 Hz, but ``LineFollowerController``'s
+``camera_profile`` selects where the camera geometry comes from: ``"real"``
+(default) builds it from this robot's own measured FOV/mount height/pitch/
+roll/yaw parameters (see ``turtlebot3_burger_real_camera()`` in
+``common/camera_geometry.py``); ``"gazebo"`` is a fixed 640x480 preset kept
+only as a fallback -- this package dropped its Gazebo deployment line on
+2026-08-08, so that profile no longer corresponds to anything this package
+can launch.
+
+This file lived at ``gazebo/line_follower_node.py`` until that
+removal: it was always the Gazebo node AND the single-process real-robot
+deployment, which is why it now sits under ``real/``. ``LineFollowerController``'s
 ``FilteredPID`` bakes a fixed ``Ts_Control`` (20 Hz) into its derivative/
 integrator terms at construction (it takes no per-call dt) -- exactly like
 mujoco_line_follower_node.py's timer-driven loop. So this node does the same:
@@ -24,9 +36,8 @@ regardless of the camera's actual publish rate.
 
 Usage
 -----
-    ros2 launch simple_camera_pid track_bringup.launch.py map:=track_hard controller:=false
-    ros2 launch simple_camera_pid gazebo_line_follower.launch.py
-    ros2 launch simple_camera_pid gazebo_line_follower.launch.py \\
+    ros2 launch simple_camera_pid real_line_follower.launch.py
+    ros2 launch simple_camera_pid real_line_follower.launch.py \\
         residual_model_path:=/path/to/sac_agent.zip residual_algo:=sac \\
         residual_use_wheel_speed_obs:=true residual_use_2d_action:=true
 """
@@ -78,9 +89,9 @@ def _image_msg_to_rgb(msg: Image) -> Optional[np.ndarray]:
     return None
 
 
-class GazeboLineFollowerNode(Node):
+class LineFollowerNode(Node):
     def __init__(self) -> None:
-        super().__init__("gazebo_line_follower_node")
+        super().__init__("line_follower_node")
         self._declare_parameters()
 
         self.robot = RobotConfig(
@@ -102,12 +113,13 @@ class GazeboLineFollowerNode(Node):
         self.controller.reset()
 
         # Same vision algorithm as the MuJoCo side. camera_profile selects the
-        # geometry: "gazebo" (default) uses the sim camera's own fixed
-        # 640x480 (see turtlebot3_burger_gazebo_camera()'s docstring);
-        # "real" builds it from the camera_fovy_deg/camera_mount_height/
-        # camera_pitch_deg/image_width/image_height parameters below, for a
-        # real robot's actual camera (see turtlebot3_burger_real_camera()'s
-        # docstring in common/camera_geometry.py).
+        # geometry: "real" (default) builds it from the camera_fovy_deg/
+        # camera_mount_height/camera_pitch_deg/camera_roll_deg/camera_yaw_deg/
+        # image_width/image_height parameters below, measured off this
+        # robot's actual camera (see turtlebot3_burger_real_camera()'s
+        # docstring in common/camera_geometry.py); "gazebo" is a fixed
+        # 640x480 preset kept only as a fallback, left over from the Gazebo
+        # deployment line this package dropped on 2026-08-08.
         # roi_bottom_fraction=0.3 (not MATLAB's Gazebo default of 0.10) plus
         # roi_widen_step/roi_widen_max below are jointly the 2026-07-29 fix
         # for this camera's found-rate problem -- see LineFollowerVision's
@@ -183,8 +195,8 @@ class GazeboLineFollowerNode(Node):
 
         self._last_vision = None  # LocalPathResult, updated by _image_callback
 
-        # cmd_vel_stamped: Gazebo's ros_gz_bridge expects plain Twist (see
-        # config/gazebo/ros_gz_bridge_turtlebot3.yaml), but this project's
+        # cmd_vel_stamped: plain Twist is the historical default (it is what
+        # the since-removed Gazebo ros_gz_bridge wanted), but this project's
         # real TurtleBot3's turtlebot3_node subscribes to TwistStamped (a
         # newer turtlebot3_node/ros2_control convention) -- publishing plain
         # Twist against it is not an error, it just silently never connects
@@ -203,15 +215,15 @@ class GazeboLineFollowerNode(Node):
         ts_control = controller_cfg.ts_control
         self.timer = self.create_timer(ts_control, self._on_timer)
         self.get_logger().info(
-            f"Gazebo line follower started: residual={'on' if self._residual_model else 'off'}, "
+            f"line_follower_node started: residual={'on' if self._residual_model else 'off'}, "
             f"control rate={1.0 / ts_control:.1f} Hz (camera may publish at a different rate)"
         )
 
     def _declare_parameters(self) -> None:
         self.declare_parameter("image_topic", "/camera/image_raw")
         self.declare_parameter("cmd_vel_topic", "/cmd_vel")
-        self.declare_parameter("diagnostic_topic", "/gazebo_line_follower/debug")
-        # False (default): plain Twist, matches Gazebo's ros_gz_bridge. True:
+        self.declare_parameter("diagnostic_topic", "/line_follower/debug")
+        # False (default): plain Twist. True:
         # TwistStamped, matches this project's real TurtleBot3's
         # turtlebot3_node -- see the cmd_vel_stamped comment in __init__.
         self.declare_parameter("cmd_vel_stamped", False)
@@ -243,7 +255,10 @@ class GazeboLineFollowerNode(Node):
         # placeholder, not tied to the "gazebo" profile's own fixed 640x480
         # (which always comes from turtlebot3_burger_gazebo_camera()
         # regardless of these three parameters).
-        self.declare_parameter("camera_profile", "gazebo")
+        # Default flipped "gazebo" -> "real" on 2026-08-08 with the removal of
+        # the Gazebo line: this node's only remaining deployment is the real
+        # robot, so the previous default pointed at a profile nothing launches.
+        self.declare_parameter("camera_profile", "real")
         self.declare_parameter("image_width", 640)
         self.declare_parameter("image_height", 480)
         self.declare_parameter("camera_fovy_deg", 45.9857)
@@ -352,7 +367,7 @@ class GazeboLineFollowerNode(Node):
 
 def main(args: Optional[Sequence[str]] = None) -> None:
     rclpy.init(args=args)
-    node = GazeboLineFollowerNode()
+    node = LineFollowerNode()
 
     # rclpy.init()'s own default SIGINT handler can invalidate the rcl
     # context before this function's `except KeyboardInterrupt` block ever

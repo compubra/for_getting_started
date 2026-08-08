@@ -5,7 +5,7 @@ TurtleBot3's Raspberry Pi) publishes this; ``control_node.py`` (meant to run
 on the PC) subscribes to it. A plain ``Float32MultiArray`` instead of a
 custom ``.msg`` -- avoids adding a whole separate rosidl interface package
 just for five floats, and matches this project's existing diagnostic-topic
-convention (see ``gazebo_line_follower_node.py``'s ``_publish_diagnostics``).
+convention (see ``line_follower_node.py``'s ``_publish_diagnostics``).
 """
 from __future__ import annotations
 

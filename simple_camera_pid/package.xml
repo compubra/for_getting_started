@@ -31,20 +31,19 @@
        without forking the tree: the files stay identical on every machine,
        only the environment differs.
 
-       Set exactly one of these in each machine's ~/.bashrc:
-         PC   : export SIMPLE_CAMERA_PID_SIM=1
+       Set this in the robot's ~/.bashrc:
          robot: export SIMPLE_CAMERA_PID_ROBOT=1
-       With neither set, rosdep resolves only the core dependencies above,
-       which is enough to build and to run the vision node.
+       With it unset, rosdep resolves only the core dependencies above, which
+       is what the PC wants: the remaining deployment line there is MuJoCo,
+       whose extra dependencies are all pip, not ROS (see
+       requirements-sim.txt). The Gazebo line, which was the only reason this
+       package ever needed ros_gz_sim/turtlebot3_gazebo, was removed on
+       2026-08-08; its single-process control node was the real robot's too
+       and now lives at simple_camera_pid/real/line_follower_node.py.
 
        NOTE: `colcon build` does not resolve exec_depend at all; these only
        affect `rosdep install`. Building this package has never required any
        of them. -->
-
-  <!-- Gazebo line: launch/gazebo/track_world.launch.py needs the Harmonic
-       bridge and the stock TurtleBot3 models. -->
-  <exec_depend condition="$SIMPLE_CAMERA_PID_SIM == 1">ros_gz_sim</exec_depend>
-  <exec_depend condition="$SIMPLE_CAMERA_PID_SIM == 1">turtlebot3_gazebo</exec_depend>
 
   <!-- Real-robot line: launch/real/robot_bringup.launch.py loads
        camera::CameraNode from camera_ros, starts turtlebot3_node's

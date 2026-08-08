@@ -16,7 +16,7 @@ directory is plain importable Python, independent of ROS. Two things that
 used to live here have since moved out:
 
   - The PID controller (`control/`) and vision algorithm (`vision.py`) now
-    live under `../common/`, since `gazebo_line_follower_node.py`/
+    live under `../common/`, since `line_follower_node.py`/
     `vision_debug_node.py` use the exact same implementations against real
     Gazebo camera frames — see `../common/README.md`.
   - Everything RL-training-specific (`sim/residual_env.py`,
@@ -51,7 +51,7 @@ vision ROI/threshold parameters), read directly out of the `.slx` model
 workspace via MATLAB MCP tools so the port starts from the same numbers as
 the original model. `../common/control/` (the PID controller) and
 `../common/vision.py` (the vision algorithm) live outside this directory
-precisely because they're shared with `gazebo_line_follower_node.py`.
+precisely because they're shared with `line_follower_node.py`.
 
 ## Quick start (outside ROS)
 
@@ -128,7 +128,7 @@ exactly this class in a timer loop — see the top-level package README for
   MuJoCo's raw bottom-row-first OpenGL framebuffer. The Python `mujoco`
   package's `Renderer.render()` already returns a conventional top-row-first
   image, so `sim/turtlebot3_mujoco_env.py` constructs the vision module with
-  `flip_vertical=False` (as does `gazebo_line_follower_node.py`, for ROS
+  `flip_vertical=False` (as does `line_follower_node.py`, for ROS
   `sensor_msgs/Image`'s own top-row-first convention). The vision module
   keeps the flip as a constructor-configurable default (`True`) for fidelity
   to the MATLAB behavior on a raw framebuffer.
@@ -193,13 +193,13 @@ falls back to copying files instead of symlinking them — there is no
 separate "colcon-symlink-install" extension package to install, that was a
 mistaken assumption in an earlier version of this note. The launch file's
 first version computed its `repo_root` default by walking up from its own
-installed file location (mirroring `track_bringup.launch.py`'s
+installed file location (mirroring the since-deleted `track_bringup.launch.py`'s
 `DEFAULT_TRACKS_PATH` convention) — under a real symlink-install that walk
 lands back in the source tree; under a plain copy it resolves into
 `install/simple_camera_pid`, which has no `model/mujoco/`, and the node
 crashed on startup. Fixed with three layers, checked in order: (1) a
 hardcoded known-workspace-root constant matching
-`track_world.launch.py`'s `KNOWN_WORKSPACE_TRACKS_PATH` pattern, checked
+the since-deleted `track_world.launch.py`'s `KNOWN_WORKSPACE_TRACKS_PATH` pattern, checked
 first by both the node's own fallback and the launch file's `repo_root`
 default; (2) searching upward from the current working directory for a
 `model/mujoco` marker (works for the standard

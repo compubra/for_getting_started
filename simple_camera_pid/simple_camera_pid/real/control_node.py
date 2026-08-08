@@ -5,13 +5,13 @@ Meant to run ON THE PC: subscribes to the small steering/lateral/heading-error
 message ``vision_node.py`` publishes (see ``local_path_msg.py``) instead of a
 raw camera frame, runs
 ``common.control.line_follower_controller.LineFollowerController`` (+
-optional SAC/PPO residual policy, same as ``gazebo_line_follower_node.py``)
+optional SAC/PPO residual policy, same as ``line_follower_node.py``)
 at a fixed 20 Hz control period, and publishes ``/cmd_vel``. See
 ``vision_node.py``'s module docstring for why this is split across two
-machines/two nodes instead of ``gazebo_line_follower_node.py``'s
+machines/two nodes instead of ``line_follower_node.py``'s
 single-node design.
 
-Same sample-and-hold pattern as ``gazebo_line_follower_node.py``: the
+Same sample-and-hold pattern as ``line_follower_node.py``: the
 local-path subscription callback only updates a "latest" buffer; a separate
 fixed-rate timer runs the control step, so the control loop's PID dynamics
 stay correctly calibrated regardless of ``vision_node``'s actual publish rate
@@ -140,7 +140,7 @@ class LineFollowerControlNode(Node):
         self.declare_parameter("n_filter", ControllerConfig.n_filter)
         self.declare_parameter("steering_sign", ControllerConfig.steering_sign)
         # These three set the actual commanded speed magnitude -- see the
-        # matching comment in gazebo_line_follower_node.py's
+        # matching comment in line_follower_node.py's
         # _declare_parameters for why these needed adding (2026-07-31: a
         # real robot commanded 0.343 m/s linear / saturated 1.5 rad/s
         # angular off the untouched Gazebo-tuned defaults, before this fix

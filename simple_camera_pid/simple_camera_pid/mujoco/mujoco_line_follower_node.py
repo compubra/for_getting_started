@@ -43,7 +43,7 @@ from simple_camera_pid.mujoco.sim.turtlebot3_mujoco_env import Turtlebot3LineFol
 
 
 # This workspace's known location on this machine — checked first, same
-# pattern as track_world.launch.py's KNOWN_WORKSPACE_TRACKS_PATH. The
+# pattern as the since-deleted track_world.launch.py's KNOWN_WORKSPACE_TRACKS_PATH. The
 # mujoco_line_follower.launch.py default already hardcodes this as the
 # repo_root argument, so this constant only matters for `ros2 run
 # mujoco_line_follower_node` directly (no launch file) with no repo_root set.
@@ -55,7 +55,7 @@ def _default_repo_root() -> str:
 
     The MuJoCo model assets under ``model/mujoco`` live outside any
     package's installed share directory (matching how the Gazebo track
-    models are handled — see ``track_bringup.launch.py``'s
+    models are handled — see the since-deleted ``track_bringup.launch.py``'s
     ``DEFAULT_TRACKS_PATH``), so there is no installed copy to point at.
     Walking up from this file's own location only works when colcon
     actually symlinks the installed package back to source; on this

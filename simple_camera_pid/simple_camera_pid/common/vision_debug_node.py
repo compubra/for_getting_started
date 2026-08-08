@@ -4,7 +4,7 @@
 Subscribes to a raw camera topic, runs the same
 ``common.vision.LineFollowerVision`` algorithm (Hough-seed + sliding-window +
 ground-quadratic-fit, see ``common/vision.py``'s module docstring) used by
-``gazebo_line_follower_node.py``/``mujoco_line_follower_node.py`` on every
+``line_follower_node.py``/``mujoco_line_follower_node.py`` on every
 frame, and republishes an annotated copy via
 ``common.debug_frame.render_debug_frame`` -- the full overlay ported from
 MATLAB's ``originbot_line_follower_debug_frame.m`` (see that file's
@@ -40,7 +40,7 @@ tick -- it is a monitoring tap, not a splice into the control loop.
 
 Usage
 -----
-    ros2 launch simple_camera_pid gazebo_monitor.launch.py
+    ros2 launch simple_camera_pid real_monitor.launch.py vision_debug:=true
     ros2 run simple_camera_pid vision_debug_node
     ros2 run simple_camera_pid vision_debug_node --ros-args \\
         -p platform:=mujoco -p image_height:=480 -p image_width:=640 \\
@@ -48,11 +48,11 @@ Usage
     ros2 run simple_camera_pid vision_debug_node --ros-args \\
         --params-file install/simple_camera_pid/share/simple_camera_pid/config/real/real_line_follower.yaml \\
         -p platform:=real
-        (real robot -- run this BEFORE trusting gazebo_line_follower_node to
+        (real robot -- run this BEFORE trusting line_follower_node to
         actually drive: reuses the same real_line_follower.yaml you filled in
         for the control node -- image_topic/image_width/image_height/
         camera_fovy_deg/camera_mount_height/camera_pitch_deg all come from
-        there, since that file's top-level key is gazebo_line_follower_node
+        there, since that file's top-level key is line_follower_node
         but unrecognized keys are silently ignored by other nodes, so this
         picks up exactly the subset it declares. Point rqt_image_view at
         /vision_debug/image_raw and confirm found=1/steering_error has the

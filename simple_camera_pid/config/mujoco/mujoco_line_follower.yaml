@@ -40,7 +40,7 @@ mujoco_line_follower_node:
     heading_gain: 0.35
     curvature_gain: 0.04
     # Adaptive-ROI fallback (2026-07-29, see LineFollowerVision.roi_widen_step
-    # in common/vision.py and config/gazebo/gazebo_line_follower.yaml for the
+    # in common/vision.py (and, before its 2026-08-08 removal, the Gazebo yaml) for the
     # full writeup -- this camera's roi_bottom_fraction/lookahead_distance
     # pair already brackets its near-field range well, measured found_rate
     # 100% on ellipse, so this should rarely/never trigger here; kept at the

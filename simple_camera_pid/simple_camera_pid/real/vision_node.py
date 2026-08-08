@@ -4,7 +4,7 @@
 Meant to run ON THE ROBOT (next to the camera, e.g. the TurtleBot3's
 Raspberry Pi): subscribes to the raw camera topic, runs
 ``common.vision.LineFollowerVision`` (the same algorithm
-``gazebo_line_follower_node.py`` uses), and publishes just the resulting
+``line_follower_node.py`` uses), and publishes just the resulting
 steering/lateral/heading error + confidence + found as a small
 ``Float32MultiArray`` on ``local_path_topic`` (see ``local_path_msg.py``) --
 NOT the raw camera frame. Pairs with ``control_node.py`` (meant to run on the
@@ -19,7 +19,7 @@ only that tiny message on the network, at the cost of the vision compute
 itself running on the Pi's weaker CPU instead of the PC's.
 
 For the simpler single-machine alternative (vision + PID in one node, no
-network hop at all), see ``gazebo_line_follower_node.py`` /
+network hop at all), see ``line_follower_node.py`` /
 ``real_line_follower.launch.py`` instead -- this split only makes sense once
 the control loop is actually meant to run on a different machine than the
 camera.

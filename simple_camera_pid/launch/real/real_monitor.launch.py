@@ -4,7 +4,7 @@ Meant to run ON THE PC, alongside line_follower_vision_node (on the Pi) and
 line_follower_control_node (on the PC) -- see real_line_follower.launch.py
 for the single-process alternative, or run the two split nodes directly for
 the actual control loop. This file only starts monitoring tools, no control
-loop of its own -- same division of labor as gazebo_monitor.launch.py.
+loop of its own.
 
 vision_debug_node normally runs ON THE PI, not here -- for the same reason
 line_follower_vision_node does (see that node's module docstring): subscribing
@@ -21,10 +21,10 @@ WiFi cost described above -- vision_debug_node's own subscription is to the
 RAW /camera/image_raw, so this is for a one-off debug session, never for a
 normal control-loop run. Default is false.
 
-This file uses rviz/real_monitor.rviz, NOT gazebo_monitor.rviz -- same
-layout (annotated image, pose, trajectory), minus the raw-camera Image
-panel. Confirmed 2026-07-31: with both gazebo_monitor.rviz's Image panels
-subscribed (raw /camera/image_raw + annotated /vision_debug/image_raw, both
+This file uses rviz/real_monitor.rviz: annotated image, pose, trajectory,
+and deliberately no raw-camera Image panel. Confirmed 2026-07-31 (against
+the then-current gazebo_monitor.rviz, since deleted): with both of its Image
+panels subscribed (raw /camera/image_raw + annotated /vision_debug/image_raw, both
 full 800x600 frames) on top of an already-marginal WiFi link, the resulting
 traffic congested the link badly enough to drop the operator's unrelated SSH
 session into the Pi -- not a camera/resolution/power problem, a "two
@@ -50,9 +50,8 @@ Arguments
     plot        Launch rqt_plot windows for commanded-vs-measured linear/
                 angular velocity (default true). Field paths assume
                 TwistStamped (this robot's turtlebot3_node convention -- see
-                cmd_vel_stamped in gazebo_line_follower_node.py/
-                control_node.py), unlike gazebo_monitor.launch.py's plain
-                Twist paths.
+                cmd_vel_stamped in line_follower_node.py/
+                control_node.py).
     trajectory  Launch trajectory_path_node, publishing the driven route as
                 a nav_msgs/Path on /trajectory (default true).
     vision_debug
@@ -130,7 +129,7 @@ def generate_launch_description():
     return LaunchDescription([
         DeclareLaunchArgument(
             'rviz', default_value='true',
-            description='Launch rviz2 (reuses gazebo_monitor.rviz -- its topic names are '
+            description='Launch rviz2 (real_monitor.rviz -- its topic names are '
                         'platform-generic, not Gazebo-specific).',
         ),
         DeclareLaunchArgument(

@@ -1,8 +1,7 @@
 """Launch the plain-PID line follower against a real TurtleBot3.
 
-Starts gazebo_line_follower_node only (it's the same node used for Gazebo --
-see gazebo_line_follower.launch.py's docstring for why -- just pointed at a
-real camera topic and with use_sim_time forced off). Bring up the robot's own
+Starts line_follower_node only (vision + PID + /cmd_vel in one process,
+with use_sim_time forced off). Bring up the robot's own
 base/motors/odometry (turtlebot3_bringup or equivalent) and a camera driver
 publishing sensor_msgs/Image in rgb8/bgr8/rgba8/bgra8 separately -- this
 launch file only starts the vision+PID+control node.
@@ -71,8 +70,8 @@ def generate_launch_description():
 
     node = Node(
         package='simple_camera_pid',
-        executable='gazebo_line_follower_node',
-        name='gazebo_line_follower_node',
+        executable='line_follower_node',
+        name='line_follower_node',
         output='screen',
         parameters=[
             config_file,

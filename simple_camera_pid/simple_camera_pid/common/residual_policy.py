@@ -1,5 +1,5 @@
 """Shared inference-time helpers for the optional SAC/PPO residual policy
-loaded by mujoco_line_follower_node.py and gazebo_line_follower_node.py.
+loaded by mujoco_line_follower_node.py and line_follower_node.py.
 
 Centralized here rather than duplicated in both nodes: the two node files
 consume the SAME HPC-side observation/action layout, and hpc/*/lsac/
