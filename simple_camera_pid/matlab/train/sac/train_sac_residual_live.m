@@ -78,7 +78,7 @@ if ~isfolder(outDir), mkdir(outDir); end
 % 清理上次崩溃/中断可能残留的 MuJoCo MEX host（健康会话上是无害的幂等操作）
 recover_mujoco_host(mdl);
 if ~bdIsLoaded(mdl), open_system(mdlFile); end
-set_turtlebot3_mujoco_scene(mdl, MapKey); %[output:67d0685a]
+set_turtlebot3_mujoco_scene(mdl, MapKey); %[output:5536c4a5]
 ws = get_param(mdl, "ModelWorkspace");
 assignin(ws, "SAC_Q",             RewardQ);
 assignin(ws, "SAC_Q_Lateral",     RewardQLateral);
@@ -88,17 +88,17 @@ assignin(ws, "SAC_P_Lost",        RewardPLost);
 assignin(ws, "SAC_Done_Steps",    DoneSteps);
 assignin(ws, "SAC_MaxDeltaOmega", MaxDeltaOmega);
 assignin(ws, "SAC_MaxDeltaV",     MaxDeltaV);
-disp("Reward weights written to model workspace:") %[output:4c17d287]
-disp(table(RewardQ, RewardQLateral, RewardQHeading, RewardR, RewardPLost, DoneSteps)) %[output:9a8407bb]
-if TrainAgent %[output:group:37afdc78]
+disp("Reward weights written to model workspace:")
+disp(table(RewardQ, RewardQLateral, RewardQHeading, RewardR, RewardPLost, DoneSteps))
+if TrainAgent
     disp("Mode: TRAIN (cfg.TrainAgent = true) - building a new agent and calling train().")
 else
-    disp("Mode: EVAL ONLY (cfg.TrainAgent = false) - loading an existing agent and calling sim(), no training.") %[output:59e7aba5]
-end %[output:group:37afdc78]
+    disp("Mode: EVAL ONLY (cfg.TrainAgent = false) - loading an existing agent and calling sim(), no training.")
+end
 %%
 %[text] ## 训练或仅评估（`cfg.TrainAgent` 开关）
 %[text] `cfg.TrainAgent = true` 时执行原有训练流程：构建观测/动作规格与新 SAC 智能体（`train/shared/rl_io_specs.m`，动作是 2 维 `[delta_v; delta_omega]`，2026-07-21 起 PID 和 SAC 共用根层 `Diff_Drive_Kinematics` 转轮速），挂上域随机化 `ResetFcn`，配置 `rlTrainingOptions`，调用 `train()`，最后把训练好的 agent 存档并载入 `SAC_Agent` 块。`cfg.TrainAgent = false` 时跳过以上全部步骤，改为从 `cfg.EvalAgentFile`（或 `outDir` 下最新的 `sac_agent_*.mat`）载入一个已训练好的 agent 到同一个块，再直接 `sim(mdl)` 跑一次仿真评估，即"只调用模型，不训练"。
-if TrainAgent %[output:group:1f59f53b]
+if TrainAgent
     [obsInfo, actInfo] = rl_io_specs(MaxDeltaOmega, MaxDeltaV);
     agentOpts = rlSACAgentOptions( ...
         "SampleTime",             -1, ...
@@ -193,43 +193,19 @@ else
     loaded = load(agentFile, "trainedAgent");
     assignin("base", "trainedAgent", loaded.trainedAgent);
     set_param(agentBlk, "Agent", "trainedAgent");
-    disp("Loaded agent for evaluation:") %[output:7f17db0c]
-    disp(agentFile) %[output:9770fc6f]
+    disp("Loaded agent for evaluation:")
+    disp(agentFile)
     % 不强制关渲染——评估通常是想看着车跑，保留模型当前的渲染设置。
-    simOut = sim(mdl); %[output:327e3e03] %[output:17d63306]
+    simOut = sim(mdl);
     assignin("base", "simOut", simOut);
-    disp("Evaluation sim() complete. Inspect simOut in the base workspace.") %[output:742c65ff]
-end %[output:group:1f59f53b]
+    disp("Evaluation sim() complete. Inspect simOut in the base workspace.")
+end
 
 %[appendix]{"version":"1.0"}
 %---
 %[metadata:view]
 %   data: {"layout":"inline"}
 %---
-%[output:67d0685a]
-%   data: {"dataType":"text","outputData":{"text":"Set visual_line_follower_sac_residual MuJoCo scene to \/media\/kevin\/ding\/final_project\/Sheffield\/for_getting_started\/src\/simple_camera_pid\/matlab\/..\/model\/mujoco\/turtlebot3\/simple_camera_track_turtlebot3_burger_visual_scene.xml (in memory; not saved)\n","truncated":false}}
-%---
-%[output:4c17d287]
-%   data: {"dataType":"text","outputData":{"text":"Reward weights written to model workspace:\n","truncated":false}}
-%---
-%[output:9a8407bb]
-%   data: {"dataType":"text","outputData":{"text":"    <strong>RewardQ<\/strong>    <strong>RewardQLateral<\/strong>    <strong>RewardQHeading<\/strong>    <strong>RewardR<\/strong>    <strong>RewardPLost<\/strong>    <strong>DoneSteps<\/strong>\n    <strong>_______<\/strong>    <strong>______________<\/strong>    <strong>______________<\/strong>    <strong>_______<\/strong>    <strong>___________<\/strong>    <strong>_________<\/strong>\n\n       1            0.5               0.5            0.1          10            100   \n\n","truncated":false}}
-%---
-%[output:59e7aba5]
-%   data: {"dataType":"text","outputData":{"text":"Mode: EVAL ONLY (cfg.TrainAgent = false) - loading an existing agent and calling sim(), no training.\n","truncated":false}}
-%---
-%[output:7f17db0c]
-%   data: {"dataType":"text","outputData":{"text":"Loaded agent for evaluation:\n","truncated":false}}
-%---
-%[output:9770fc6f]
-%   data: {"dataType":"text","outputData":{"text":"\/media\/kevin\/ding\/final_project\/Sheffield\/for_getting_started\/src\/simple_camera_pid\/matlab\/simulation_data\/sac_training\/sac_agent_20260722_191331.mat\n","truncated":false}}
-%---
-%[output:327e3e03]
-%   data: {"dataType":"text","outputData":{"text":"Active TurtleBot3 map: Simple camera track (simple)\n","truncated":false}}
-%---
-%[output:17d63306]
-%   data: {"dataType":"warning","outputData":{"text":"Warning: '<a href=\"matlab:Simulink.internal.open_and_hilite_port_hyperlink('hilite', ['visual_line_follower_sac_residual\/OriginBot_Line_Follower'], 'Outport', 5);\">Output Port 5<\/a>' of block '<a href=\"matlab:open_and_hilite_hyperlink ('visual_line_follower_sac_residual\/OriginBot_Line_Follower','error')\">visual_line_follower_sac_residual\/OriginBot_Line_Follower<\/a>' is not connected."}}
-%---
-%[output:742c65ff]
-%   data: {"dataType":"text","outputData":{"text":"Evaluation sim() complete. Inspect simOut in the base workspace.\n","truncated":false}}
+%[output:5536c4a5]
+%   data: {"dataType":"error","outputData":{"errorType":"runtime","text":"Error using <a href=\"matlab:matlab.lang.internal.introspective.errorDocCallback('set_turtlebot3_mujoco_scene', '\/media\/kevin\/ding\/final_project\/Sheffield\/for_getting_started\/src\/simple_camera_pid\/matlab\/runtime\/scene\/set_turtlebot3_mujoco_scene.m', 61)\" style=\"font-weight:bold\">set_turtlebot3_mujoco_scene<\/a> (<a href=\"matlab: opentoline('\/media\/kevin\/ding\/final_project\/Sheffield\/for_getting_started\/src\/simple_camera_pid\/matlab\/runtime\/scene\/set_turtlebot3_mujoco_scene.m',61,0)\">line 61<\/a>)\nError evaluating <a href=\"matlab:Simulink.internal.OpenCallbackParamsDialog(['visual_line_follower_sac_residual\/MuJoCo_Plant'],'MaskParameterCallback');\">'MaskParameterCallback'<\/a> callback of MuJoCo Plant block (mask) '<a href=\"matlab:open_and_hilite_hyperlink ('visual_line_follower_sac_residual\/MuJoCo_Plant','error')\">visual_line_follower_sac_residual\/MuJoCo_Plant<\/a>'. \nCallback string is 'relpath = get_param(gcb, 'xmlFileRel');\n\nabspath = which(relpath);\nif isempty(abspath)\n    abspath = relpath;\nend\nset_param(gcb, 'xmlFile', abspath);'\n\nCaused by:\n    Error using <a href=\"matlab:matlab.lang.internal.introspective.errorDocCallback('set_turtlebot3_mujoco_scene', '\/media\/kevin\/ding\/final_project\/Sheffield\/for_getting_started\/src\/simple_camera_pid\/matlab\/runtime\/scene\/set_turtlebot3_mujoco_scene.m', 61)\" style=\"font-weight:bold\">set_turtlebot3_mujoco_scene<\/a> (<a href=\"matlab: opentoline('\/media\/kevin\/ding\/final_project\/Sheffield\/for_getting_started\/src\/simple_camera_pid\/matlab\/runtime\/scene\/set_turtlebot3_mujoco_scene.m',61,0)\">line 61<\/a>)\n    Error in '<a href=\"matlab:open_and_hilite_hyperlink ('visual_line_follower_sac_residual\/MuJoCo_Plant','error')\">visual_line_follower_sac_residual\/MuJoCo_Plant<\/a>': Failed to evaluate mask initialization commands.\n        Error using <a href=\"matlab:matlab.lang.internal.introspective.errorDocCallback('set_turtlebot3_mujoco_scene', '\/media\/kevin\/ding\/final_project\/Sheffield\/for_getting_started\/src\/simple_camera_pid\/matlab\/runtime\/scene\/set_turtlebot3_mujoco_scene.m', 61)\" style=\"font-weight:bold\">set_turtlebot3_mujoco_scene<\/a> (<a href=\"matlab: opentoline('\/media\/kevin\/ding\/final_project\/Sheffield\/for_getting_started\/src\/simple_camera_pid\/matlab\/runtime\/scene\/set_turtlebot3_mujoco_scene.m',61,0)\">line 61<\/a>)\n        std::bad_alloc"}}
 %---

@@ -197,6 +197,43 @@
     base_speed_scale: 0.003
     max_angular_speed: 1.0
 
+    # --- Safety layer + lost-line recovery (ported from MATLAB 2026-08-09).
+    # Sits between the PID/residual command and the wheels. See
+    # simple_camera_pid/common/control/safety_filter.py for the CBF derivation
+    # and matlab/runtime/control/README.md for the closed-loop measurements.
+    #
+    # NOTHING HERE HAS RUN ON THE ROBOT. The numbers are bit-exact ports of
+    # values chosen against MuJoCo, whose operating point is different: sim
+    # runs 0.15 m/s, this robot runs base_linear_speed*base_speed_scale =
+    # 0.06 m/s. safety_max_accel_* and the max_v/max_omega box (taken from
+    # base_linear_speed/max_angular_speed above) are therefore well clear of
+    # anything this robot actually does -- i.e. the box constraints will
+    # effectively never bind until they are re-derived from a real run.
+    #
+    # ALSO UNRESOLVED: the CBF consumes heading_error directly, and a
+    # 2026-08-07 session measured a stable +0.21..+0.34 rad (12-19 deg)
+    # heading_error bias with the robot stationary and centred, attributed to
+    # mount looseness and not yet cancelled (camera_roll_deg/camera_yaw_deg
+    # above are still 0.0 placeholders). Until that is calibrated the barrier
+    # is being evaluated around the wrong operating point. Calibrate first.
+    control_period: 0.05      # must match this node's timer; on real hardware the
+    # loop is not exactly periodic (camera rate, network, processing jitter) and
+    # both the rate limits and the line memory's dead reckoning assume fixed dt
+    safety_enable_filter: true
+    # Default false. 2026-08-09 MuJoCo ablation: neither in-place scanning nor
+    # memory-guided recovery beat leaving this project's existing forward-crawl
+    # alone -- the untouched baseline reacquired the line and completed a lap,
+    # both recovery strategies stopped and never recovered. The bottleneck was
+    # measured to be detection, not recovery. Do not enable before the
+    # observation side is fixed.
+    safety_enable_search: false
+    safety_lateral_max: 0.8       # normalized; 0.8 * 0.55 m = 0.44 m lookahead offset
+    safety_cbf_alpha: 2.0
+    safety_speed_backoff: 0.3     # heuristic near-boundary slowdown, NOT part of the
+    # CBF's forward-invariance guarantee -- keep that distinction in any writeup
+    safety_max_accel_v: 40.0      # v units/s (x base_speed_scale for m/s^2)
+    safety_max_accel_omega: 10.0  # rad/s^2
+
     # This project's real TurtleBot3's turtlebot3_node subscribes to
     # TwistStamped, not plain Twist (the since-removed Gazebo ros_gz_bridge wanted plain
     # Twist instead -- see cmd_vel_stamped's comment in

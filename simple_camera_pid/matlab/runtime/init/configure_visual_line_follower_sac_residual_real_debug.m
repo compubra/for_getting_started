@@ -49,7 +49,25 @@ runtimeRoot = fileparts(fileparts(mfilename("fullpath")));
 addpath(genpath(runtimeRoot));
 clear originbot_sliding_window_path_generator;
 clear originbot_line_follower_debug_frame;
+clear lf_line_search;
+clear lf_safety_filter;
 exportLocalPathParameters(bdroot);
+exportSafetyParameters(bdroot);
+
+function exportSafetyParameters(model)
+% 安全层 + 丢线扫描找线（Line_Search / Safety_Filter 两个子系统）的参数，导出到
+% Base 工作区供它们的 Interpreted MATLAB Function 块按名字引用。
+%
+% "mps"：**本模型与 MuJoCo 模型的线速度单位约定不同**。这里 PID_Controller
+% 直接输出 /cmd_vel 用的 linear_x（m/s），而 MuJoCo 模型的 VOmega.v 是
+% BaseLinearSpeed 刻度。传错只会让 CBF 的 v*sin(psi) 项差约 33 倍且不报错，
+% 详见 lf_safety_defaults.m 里 signalUnits 的说明。
+if isempty(find_system(model, "SearchDepth", 1, "BlockType", "SubSystem", ...
+        "Name", "Safety_Filter"))
+    return;
+end
+assignin("base", "LF_Safety", lf_safety_defaults(model, "mps"));
+end
 
 function exportLocalPathParameters(model)
 % Mirrors exportLocalPathParameters in
@@ -74,7 +92,18 @@ names = [
 % real camera frames/lighting. See config/real/real_line_follower.yaml's
 % own "still needs retuning against real ambient lighting" note for the
 % Python-side equivalent of this same caveat.
-defaults = [0.10, 30, 0.20, 0.6, 0.35, 0.04, 70, 0.30, 30, 500];
+% 2026-08-09：与 config/real/real_line_follower.yaml（真车运行时实际读的那份）
+% 对齐——ROIFraction 0.10→0.30、MinBrightness 70→170、MaxSaturation 0.30→0.20。
+%
+% 0.10 是早已删除的 Gazebo 线留下的值。170/0.20 则是真机侧 2026-08-04 从
+% lap_20260804_162821 那次转圈事故的 bag 里逐帧反推出来的：误检帧有 50.5%
+% 的 ROI 地面像素落在 value=[70,90)，普通沥青亮度漂到了旧阈值 70 正上方，
+% 约一半地面被判为线候选。**MATLAB 侧一直停在会触发该事故的 70/0.30。**
+%
+% 注意：这张硬编码表本身就是待办项（见本文件头的坑 4 与
+% load_real_params_from_yaml.m）——真相源应当是那份 yaml，这里只是把数值先
+% 同步过来，接线仍未做。
+defaults = [0.30, 30, 0.20, 0.6, 0.35, 0.04, 170, 0.20, 30, 500];
 
 for k = 1:numel(names)
     value = defaults(k);

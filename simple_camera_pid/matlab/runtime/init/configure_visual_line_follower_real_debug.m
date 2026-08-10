@@ -72,7 +72,18 @@ names = [
 % real camera frames/lighting. See config/real/real_line_follower.yaml's
 % own "still needs retuning against real ambient lighting" note for the
 % Python-side equivalent of this same caveat.
-defaults = [0.10, 30, 0.20, 0.6, 0.35, 0.04, 70, 0.30, 30, 500];
+% 2026-08-09：与 config/real/real_line_follower.yaml（真车运行时实际读的那份）
+% 对齐——ROIFraction 0.10→0.30、MinBrightness 70→170、MaxSaturation 0.30→0.20。
+%
+% 0.10 是早已删除的 Gazebo 线留下的值。170/0.20 则是真机侧 2026-08-04 从
+% lap_20260804_162821 那次转圈事故的 bag 里逐帧反推出来的：误检帧有 50.5%
+% 的 ROI 地面像素落在 value=[70,90)，普通沥青亮度漂到了旧阈值 70 正上方，
+% 约一半地面被判为线候选。**MATLAB 侧一直停在会触发该事故的 70/0.30。**
+%
+% 注意：这张硬编码表本身就是待办项（见本文件头的坑 4 与
+% load_real_params_from_yaml.m）——真相源应当是那份 yaml，这里只是把数值先
+% 同步过来，接线仍未做。
+defaults = [0.30, 30, 0.20, 0.6, 0.35, 0.04, 170, 0.20, 30, 500];
 
 for k = 1:numel(names)
     value = defaults(k);

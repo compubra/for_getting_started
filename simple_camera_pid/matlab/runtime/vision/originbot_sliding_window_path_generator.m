@@ -1,7 +1,7 @@
 function result = originbot_sliding_window_path_generator(rgbVector, ...
     roiBottomFraction, waypointCount, minBrightness, maxSaturation, ...
     minPixels, errorScale, lookaheadDistance, lateralGain, headingGain, ...
-    curvatureGain, platform)
+    curvatureGain, platform, roiWidenStep, roiWidenMax, adaptiveWindowGain)
 %ORIGINBOT_SLIDING_WINDOW_PATH_GENERATOR 滑窗+多项式拟合+霍夫变换循线算法（方案 B）。
 %
 % MuJoCo/Gazebo/real 三个平台共用本文件——不再有 "_gazebo" 后缀的姐妹文件。
@@ -48,8 +48,13 @@ function result = originbot_sliding_window_path_generator(rgbVector, ...
 % 停止，该场景已归档的方案 A（骨架+纯追踪）更强；常规弯道上本算法点列更
 % 干净、拟合输出更平滑抗噪。
 
-% 丢线时保持上一次转向和路径调试向量，避免控制器输出跳变
-persistent lastVisibleSteering lastLocalPathDebug lostLineTime
+% 丢线时保持上一次转向和路径调试向量，避免控制器输出跳变。
+% 2026-08-09 新增三项持久状态，均移植自 Python 侧 common/vision.py：
+%   lastBaseCol       霍夫种子的时间连续性先验（见 houghSeed）
+%   steeringHistory   最近若干个 found 帧的转向，用于丢线时的趋势外推
+%   lastLineWidth     上一帧实测的白线游程宽度，作为本帧首窗的搜索半径种子
+persistent lastVisibleSteering lastLocalPathDebug lostLineTime ...
+    lastBaseCol steeringHistory lostSteeringSlope lastLineWidth
 
 maxPathPoints = 30;
 debugWidth = 7 + 2 * maxPathPoints;
@@ -61,14 +66,19 @@ steerMixCentroid = 0.35;  % 质心转向(即时反馈)权重
 lateralNorm      = 0.55;  % 侧向偏差满偏(m)：机器人半宽+安全余量
 curvatureScale   = 0.20;  % 曲率进转向前的缩放
 controlPeriod    = 0.05;  % = 模型 Ts_Control(20Hz)，用于丢线计时
-freezeTimeout    = 0.5;   % <0.5s 瞬时遮挡：冻结上次转向
+freezeTimeout    = 0.5;   % <0.5s 瞬时遮挡：按趋势外推上次转向（见下）
 slowdownTimeout  = 1.5;   % 0.5~1.5s：转向线性衰减；>1.5s 判真丢线
+steeringTrendSamples = 5; % 约 0.25s 历史，用于丢线瞬间估转向变化率
 
 if isempty(lastVisibleSteering), lastVisibleSteering = 0; end
 if isempty(lastLocalPathDebug) || numel(lastLocalPathDebug) ~= debugWidth
     lastLocalPathDebug = zeros(debugWidth, 1);
 end
 if isempty(lostLineTime), lostLineTime = 0; end
+if isempty(lastBaseCol), lastBaseCol = NaN; end          % NaN = 无先验
+if isempty(steeringHistory), steeringHistory = []; end
+if isempty(lostSteeringSlope), lostSteeringSlope = 0; end
+if isempty(lastLineWidth), lastLineWidth = NaN; end       % NaN = 用 profile 种子
 
 % 缺参回退值与各自平台 InitFcn 导出表(实际调参值)一致
 if nargin < 2  || isempty(roiBottomFraction), roiBottomFraction = prof.DefaultROI; end
@@ -81,6 +91,16 @@ if nargin < 8  || isempty(lookaheadDistance), lookaheadDistance = prof.DefaultLo
 if nargin < 9  || isempty(lateralGain),       lateralGain = 0.6; end
 if nargin < 10 || isempty(headingGain),       headingGain = 0.35; end
 if nargin < 11 || isempty(curvatureGain),     curvatureGain = 0.04; end
+% 自适应 ROI 回退（2026-08-09 移植自 Python 侧 roi_widen_step/roi_widen_max）。
+% 默认值与 Python 一致且**默认启用**：这样四个模型不改 MATLABFcn 表达式就能
+% 拿到这个修复。传 0 关闭，退回单次检测的旧行为。
+if nargin < 13 || isempty(roiWidenStep),      roiWidenStep = 0.2; end
+if nargin < 14 || isempty(roiWidenMax),       roiWidenMax = 0.7; end
+% 自适应搜索半径增益。缺省用 profile 里的平台无关常数；显式传 0 可关闭该
+% 特性、退回固定 WindowHalfWidth 的旧行为（消融对比与调参用）。
+if nargin >= 15 && ~isempty(adaptiveWindowGain)
+    prof.AdaptiveWindowGain = adaptiveWindowGain;
+end
 
 roiBottomFraction = max(0.05, min(0.95, double(roiBottomFraction)));
 windowCount = max(2, min(maxPathPoints, round(double(waypointCount))));
@@ -97,73 +117,37 @@ if prof.NeedsFlip
     rgb = flip(rgb, 1);
 end
 
-pathTop = max(1, min(prof.ImageHeight, ...
-    floor((1 - roiBottomFraction) * prof.ImageHeight) + 1));
-pathBottom = prof.ImageHeight;
 centerX = 0.5 * (prof.ImageWidth + 1);
 
-% ── 白线掩码：HSV 自适应亮度 + 低饱和判据 + 最大连通块 ──────────────────
-roi = rgb(pathTop:pathBottom, :, :);
-value = max(roi, [], 3);
-minimumChannel = min(roi, [], 3);
-saturation = (value - minimumChannel) ./ max(value, 1);
-roiMaximum = max(value, [], "all");
-adaptiveBrightness = min(minBrightness, max(40, 0.55 * roiMaximum));
-mask = value >= adaptiveBrightness & saturation <= maxSaturation;
-totalPixels = sum(mask, "all");
-
-if totalPixels > 0
-    [labels, numComponents] = bwlabel(mask, 8);
-    if numComponents > 1
-        componentSizes = zeros(numComponents, 1);
-        for c = 1:numComponents
-            componentSizes(c) = sum(labels(:) == c);
+% ── 检测：先窄后宽两次尝试（自适应 ROI 回退）──────────────────────────
+% 先按调参的 roiBottomFraction 试一次（窄而精确，成功时与旧行为逐位一致）；
+% 只有当它什么都没找到时，才把 ROI 加宽 roiWidenStep 重试一次。移植自
+% Python 侧 common/vision.py 的同名机制（2026-07-29），那边的实测：ellipse
+% 地图 found 率 16.5% → 约 97%，而 track_hard 维持约 100%（加宽分支几乎不
+% 触发）。代价只有"首次失败的那些帧多跑一遍掩码/霍夫/滑窗"。
+attempt = detectAttempt(rgb, roiBottomFraction, prof, windowCount, centerX, ...
+    minBrightness, maxSaturation, minPixels, maxPathPoints, ...
+    lastBaseCol, lastLineWidth);
+if ~attempt.found && roiWidenStep > 0
+    widenedFraction = max(0.05, min(min(0.95, roiWidenMax), ...
+        roiBottomFraction + roiWidenStep));
+    if widenedFraction > roiBottomFraction
+        wideAttempt = detectAttempt(rgb, widenedFraction, prof, windowCount, ...
+            centerX, minBrightness, maxSaturation, minPixels, maxPathPoints, ...
+            lastBaseCol, lastLineWidth);
+        if wideAttempt.found
+            attempt = wideAttempt;
         end
-        [~, largestLabel] = max(componentSizes);
-        mask = (labels == largestLabel);
     end
 end
 
-% ── 1) 霍夫变换：主导直线段 → 滑窗种子列 + 列漂移斜率 ──────────────────
-[baseCol, driftPerRow, houghFound] = houghSeed(mask, prof.HoughMaxPeaks, ...
-    prof.HoughMinLength, prof.HoughFillGap, prof.MaxDriftPerRow);
-
-% 霍夫失败回退：ROI 下三分之一列直方图峰值
-if ~houghFound && totalPixels > 0
-    nearBand = mask(max(1, end - floor(size(mask, 1) / 3)):end, :);
-    columnHist = sum(nearBand, 1);
-    [peakVal, peakCol] = max(columnHist);
-    if peakVal > 0
-        baseCol = peakCol;
-    else
-        baseCol = centerX;
-    end
-    driftPerRow = 0;
-end
-
-% ── 2) 滑动窗口：自底向上收集窗内质心（行号返回全图坐标）──────────────
-[winCols, winRows, winValid, nearPixelError] = slideWindows(mask, pathTop, ...
-    baseCol, driftPerRow, windowCount, prof.WindowHalfWidth, ...
-    prof.MinWindowPixels, centerX);
-
-% 窗心 IPM 投影到地面坐标（米，X 前向 / Y 右正）
-xPoints = zeros(maxPathPoints, 1);
-yPoints = zeros(maxPathPoints, 1);
-valid = false(maxPathPoints, 1);
-writeIdx = 0;
-for k = 1:windowCount
-    if ~winValid(k), continue; end
-    [xg, yg] = originbot_pixel_to_ground(winCols(k), winRows(k), prof);
-    if isnan(xg) || isnan(yg), continue; end
-    writeIdx = writeIdx + 1;
-    xPoints(writeIdx) = xg;
-    yPoints(writeIdx) = yg;
-    valid(writeIdx) = true;
-end
-validCount = sum(valid);
-
-found = double(validCount >= 1 && totalPixels >= minPixels);
-confidence = min(1, totalPixels / max(1, windowCount * minPixels));
+xPoints        = attempt.xPoints;
+yPoints        = attempt.yPoints;
+valid          = attempt.valid;
+validCount     = attempt.validCount;
+nearPixelError = attempt.nearPixelError;
+found          = attempt.found;
+confidence     = attempt.confidence;
 
 % ── 3) 多项式拟合 + 前视几何 ───────────────────────────────────────────
 [lookaheadX, lookaheadY, headingErrorRaw, curvature, coefficients] = ...
@@ -197,21 +181,51 @@ if found > 0.5
     steeringError = currentSteeringError;
     lastVisibleSteering = steeringError;
     lastLocalPathDebug = localPathDebug;
+    lastBaseCol = attempt.baseCol;        % 霍夫种子的下一帧先验
+    lastLineWidth = attempt.lineWidth;    % 首窗搜索半径的下一帧种子
+    steeringHistory = [steeringHistory, steeringError];
+    if numel(steeringHistory) > steeringTrendSamples
+        steeringHistory = steeringHistory(end - steeringTrendSamples + 1:end);
+    end
 else
+    justLost = lostLineTime == 0;
     lostLineTime = lostLineTime + controlPeriod;
     lateralError = 0;
     headingError = 0;
     localPathDebug = lastLocalPathDebug;
     localPathDebug(1) = 0;
+
+    if justLost
+        % 在丢线的那一刻把趋势冻结下来——丢线期间没有新数据可以更新它，
+        % 逐帧重算没有意义
+        lostSteeringSlope = estimateSteeringSlope(steeringHistory, controlPeriod);
+    end
+
     if lostLineTime <= freezeTimeout
-        steeringError = lastVisibleSteering;
+        % 2026-08-09 移植自 Python：原先是把 lastVisibleSteering 平冻结，现在
+        % 按丢线瞬间的转向变化率线性外推。针对的是固定 FOV 的转弯盲区——车在
+        % 拐弯拐到一半丢线时，应该继续按原速率转，而不是冻结"弯刚开始"那个
+        % 瞬时快照。Python 侧标注此项在真机上 UNVALIDATED，样本数与是否该对
+        % 斜率本身限幅都待实测数据确认。
+        steeringError = max(-1.5, min(1.5, ...
+            lastVisibleSteering + lostSteeringSlope * lostLineTime));
     elseif lostLineTime <= slowdownTimeout
+        % 从外推在 t=freezeTimeout 处的落点开始衰减，而不是从原始
+        % lastVisibleSteering 衰减，否则 steeringError 会在两段边界跳变
+        extrapolatedAtFreezeEnd = max(-1.5, min(1.5, ...
+            lastVisibleSteering + lostSteeringSlope * freezeTimeout));
         decay = 1 - (lostLineTime - freezeTimeout) / ...
             max(eps, slowdownTimeout - freezeTimeout);
-        steeringError = lastVisibleSteering * decay;
+        steeringError = extrapolatedAtFreezeEnd * decay;
     else
         steeringError = 0;
         lastVisibleSteering = 0;
+        % 丢线这么久之后，陈旧的列先验比没有先验更糟——让下次重新看到线时
+        % 自己按最长线段挑，而不是锚在一个可能早已偏离的位置上
+        lastBaseCol = NaN;
+        lastLineWidth = NaN;
+        steeringHistory = [];
+        lostSteeringSlope = 0;
     end
 end
 
@@ -220,8 +234,115 @@ result = [steeringError; lateralError; headingError; confidence; found; ...
 end
 
 
+function a = detectAttempt(rgb, roiBottomFraction, prof, windowCount, ...
+    centerX, minBrightness, maxSaturation, minPixels, maxPathPoints, ...
+    prevBaseCol, prevLineWidth)
+%DETECTATTEMPT 在给定 ROI 深度上做一次完整的 掩码→霍夫种子→滑窗→地面投影。
+%
+% 2026-08-09 从主函数里抽出来，好让自适应 ROI 回退能用不同的
+% roiBottomFraction 调它第二次（对应 Python 侧的 _detect_attempt）。**本函数
+% 无持久状态**，时间先验(prevBaseCol/prevLineWidth)由主函数传入——两次尝试
+% 用同一份先验，谁成功就由谁去更新它。
+pathTop = max(1, min(prof.ImageHeight, ...
+    floor((1 - roiBottomFraction) * prof.ImageHeight) + 1));
+pathBottom = prof.ImageHeight;
+
+% ── 白线掩码：HSV 自适应亮度 + 低饱和判据 + 最大连通块 ──────────────────
+roi = rgb(pathTop:pathBottom, :, :);
+value = max(roi, [], 3);
+minimumChannel = min(roi, [], 3);
+saturation = (value - minimumChannel) ./ max(value, 1);
+roiMaximum = max(value, [], "all");
+adaptiveBrightness = min(minBrightness, max(40, 0.55 * roiMaximum));
+mask = value >= adaptiveBrightness & saturation <= maxSaturation;
+totalPixels = sum(mask, "all");
+
+if totalPixels > 0
+    [labels, numComponents] = bwlabel(mask, 8);
+    if numComponents > 1
+        componentSizes = zeros(numComponents, 1);
+        for c = 1:numComponents
+            componentSizes(c) = sum(labels(:) == c);
+        end
+        [~, largestLabel] = max(componentSizes);
+        mask = (labels == largestLabel);
+    end
+end
+
+% ── 1) 霍夫变换：主导直线段 → 滑窗种子列 + 列漂移斜率 ──────────────────
+[baseCol, driftPerRow, houghFound] = houghSeed(mask, prof.HoughMaxPeaks, ...
+    prof.HoughMinLength, prof.HoughFillGap, prof.MaxDriftPerRow, prevBaseCol);
+
+% 霍夫失败回退：ROI 下三分之一列直方图峰值
+if ~houghFound && totalPixels > 0
+    nearBand = mask(max(1, end - floor(size(mask, 1) / 3)):end, :);
+    columnHist = sum(nearBand, 1);
+    [peakVal, peakCol] = max(columnHist);
+    if peakVal > 0
+        baseCol = peakCol;
+    else
+        baseCol = centerX;
+    end
+    driftPerRow = 0;
+end
+
+% ── 2) 滑动窗口：自底向上逐窗测游程取中点（行号返回全图坐标）──────────
+[winCols, winRows, winValid, nearPixelError, lineWidth] = slideWindows( ...
+    mask, pathTop, baseCol, driftPerRow, windowCount, prof, centerX, ...
+    prevLineWidth);
+
+% 窗心 IPM 投影到地面坐标（米，X 前向 / Y 右正）
+xPoints = zeros(maxPathPoints, 1);
+yPoints = zeros(maxPathPoints, 1);
+valid = false(maxPathPoints, 1);
+writeIdx = 0;
+for k = 1:windowCount
+    if ~winValid(k), continue; end
+    [xg, yg] = originbot_pixel_to_ground(winCols(k), winRows(k), prof);
+    if isnan(xg) || isnan(yg), continue; end
+    writeIdx = writeIdx + 1;
+    xPoints(writeIdx) = xg;
+    yPoints(writeIdx) = yg;
+    valid(writeIdx) = true;
+end
+
+a.totalPixels    = totalPixels;
+a.xPoints        = xPoints;
+a.yPoints        = yPoints;
+a.valid          = valid;
+a.validCount     = sum(valid);
+a.nearPixelError = nearPixelError;
+a.baseCol        = baseCol;
+a.lineWidth      = lineWidth;
+a.found          = double(a.validCount >= 1 && totalPixels >= minPixels);
+a.confidence     = min(1, totalPixels / max(1, windowCount * minPixels));
+end
+
+
+function slope = estimateSteeringSlope(history, controlPeriod)
+%ESTIMATESTEERINGSLOPE 最近若干个 found 帧上转向误差的变化率(每秒)，最小二乘。
+% 移植自 Python 侧 _estimate_steering_slope。样本不足或时间跨度退化时返回 0
+% （等价于退回平冻结的旧行为）。
+n = numel(history);
+if n < 2
+    slope = 0;
+    return
+end
+xs = (0:n - 1) * controlPeriod;
+ys = double(history(:).');
+xMean = mean(xs);
+yMean = mean(ys);
+denom = sum((xs - xMean).^2);
+if denom < eps
+    slope = 0;
+    return
+end
+slope = sum((xs - xMean) .* (ys - yMean)) / denom;
+end
+
+
 function [baseCol, driftPerRow, houghFound] = houghSeed(mask, maxPeaks, ...
-    minLength, fillGap, maxDrift)
+    minLength, fillGap, maxDrift, prevBaseCol)
 %HOUGHSEED 霍夫变换找 ROI 掩码中的主导直线段，返回滑窗种子。
 %   baseCol      直线延长至掩码底行的列坐标（滑窗起始列）
 %   driftPerRow  行号 +1（向下/向近处）时列的变化量（滑窗上爬时取负向外推）
@@ -244,41 +365,58 @@ if isempty(segments)
     return
 end
 
-% 取最长线段为主导线（最能代表白线整体走向）
-bestLen = -1;
-bestSeg = segments(1);
-for s = segments
-    d = double(s.point2) - double(s.point1);   % [dCol dRow]
-    len = hypot(d(1), d(2));
-    if len > bestLen
-        bestLen = len;
-        bestSeg = s;
-    end
-end
-
-p1 = double(bestSeg.point1);                   % [col row] 掩码局部坐标
-d = double(bestSeg.point2) - p1;
-if d(2) < 0                                    % 归一化方向：行分量指向下(近处)
-    d = -d;                                    % 外推用线上任一点即可
-end
-
+% ── 候选段选择：长度闸门 + 时间连续性 tie-break ───────────────────────
+% 2026-08-09 移植自 Python 侧 _hough_seed。原先是纯取最长段，问题在于真实
+% 相机上白线有好几像素宽，**左右两条边都够格当"最长段"**，单帧传感器/JPEG
+% 噪声就能翻转谁更长——Python 侧用 0.2% 像素扰动实测到 baseCol 从 ~470 跳到
+% ~304（连 driftPerRow 的符号一起翻）。种子列在整个线宽上乱跳，下游滑窗跟着
+% 跳，这正是真车摆动事故里那条链的起点。
+%
+% 修法：先用 80% 长度闸门滤掉真正的短杂段，再在幸存者里挑**外推后最接近上一
+% 帧 baseCol** 的那条——机器人/线在一个 50ms 控制拍里不可能横跨大半个画面。
+% 没有先验时（首帧、或刚从长时间丢线恢复）退回纯取最长。
 bottomRow = size(mask, 1);
-if abs(d(2)) < 1e-6
-    % 近水平线：无法外推到底行，用线段中点列，斜率视为 0
-    baseCol = p1(1) + 0.5 * d(1);
-    driftPerRow = 0;
-else
-    driftPerRow = max(-maxDrift, min(maxDrift, d(1) / d(2)));
-    baseCol = p1(1) + (bottomRow - p1(2)) * driftPerRow;
+maskWidth = size(mask, 2);
+
+nSeg = numel(segments);
+lens = zeros(1, nSeg);
+bases = zeros(1, nSeg);
+drifts = zeros(1, nSeg);
+for k = 1:nSeg
+    p1 = double(segments(k).point1);            % [col row] 掩码局部坐标
+    d = double(segments(k).point2) - p1;
+    lens(k) = hypot(d(1), d(2));
+    if d(2) < 0                                 % 归一化方向：行分量指向下(近处)
+        d = -d;                                 % 外推用线上任一点即可
+    end
+    if abs(d(2)) < 1e-6
+        % 近水平线：无法外推到底行，用线段中点列，斜率视为 0
+        bases(k) = p1(1) + 0.5 * d(1);
+        drifts(k) = 0;
+    else
+        drifts(k) = max(-maxDrift, min(maxDrift, d(1) / d(2)));
+        bases(k) = p1(1) + (bottomRow - p1(2)) * drifts(k);
+    end
+    bases(k) = max(1, min(maskWidth, bases(k)));
 end
-baseCol = max(1, min(size(mask, 2), baseCol));
+
+survivors = find(lens >= 0.8 * max(lens));
+if isnan(prevBaseCol) || isscalar(survivors)
+    [~, pick] = max(lens);
+else
+    [~, nearest] = min(abs(bases(survivors) - prevBaseCol));
+    pick = survivors(nearest);
+end
+
+baseCol = bases(pick);
+driftPerRow = drifts(pick);
 houghFound = true;
 end
 
 
-function [winCols, winRows, winValid, nearPixelError] = slideWindows(mask, ...
-    pathTop, baseCol, driftPerRow, windowCount, halfWidth, minWinPixels, ...
-    centerX)
+function [winCols, winRows, winValid, nearPixelError, lineWidth] = ...
+    slideWindows(mask, pathTop, baseCol, driftPerRow, windowCount, prof, ...
+    centerX, prevLineWidth)
 %SLIDEWINDOWS 自底向上滑动窗口：逐窗测出白线游程、取其中点并重定中下一窗。
 %   winCols/winRows  各窗中点（列 / 全图行号）
 %   winValid         该窗是否找到足量白像素的游程
@@ -304,14 +442,34 @@ currentCol = baseCol;
 % 空窗外推速率：初值来自霍夫斜率（上爬一窗 = 行号减 windowHeight）
 lastDelta = -windowHeight * driftPerRow;
 
+% ── 自适应搜索半径（2026-08-09 新增，见 originbot_camera_profile.m）──────
+% 半径 = 增益 × 实测线宽 + 本窗最大可能列漂移。用**上一个成功窗**实测的线宽
+% 而不是全帧平均：透视会让远处的线在像素上更窄，逐窗继承天然跟着透视收缩。
+% 首窗没有本帧实测值，用上一帧留下的 prevLineWidth；再没有就退回 profile 的
+% WindowHalfWidth（即旧的手调常数，仅作冷启动种子）。
+adaptive = prof.AdaptiveWindowGain > 0;
+driftMargin = prof.MaxDriftPerRow * windowHeight;
+if adaptive && ~isnan(prevLineWidth) && prevLineWidth > 0
+    lineWidth = prevLineWidth;
+else
+    lineWidth = NaN;                 % 尚无实测宽度
+end
+
 for w = 1:windowCount
+    if adaptive && ~isnan(lineWidth)
+        searchRadius = max(prof.AdaptiveRadiusMin, min(prof.AdaptiveRadiusMax, ...
+            prof.AdaptiveWindowGain * lineWidth + driftMargin));
+    else
+        searchRadius = prof.WindowHalfWidth;   % 冷启动/关闭时的固定闸门
+    end
+
     rowHigh = roiHeight - (w - 1) * windowHeight;   % 窗底(近)
     rowLow = max(1, rowHigh - windowHeight + 1);    % 窗顶(远)
-    rowBand = mask(rowLow:rowHigh, :);              % 整行带，不再按 halfWidth 裁列
+    rowBand = mask(rowLow:rowHigh, :);              % 整行带，不按半径裁列
     colMass = sum(rowBand, 1);
 
     [runLeft, runRight, pixelCount] = findNearestRun( ...
-        colMass, currentCol, halfWidth, minWinPixels);
+        colMass, currentCol, searchRadius, prof.MinWindowPixels);
     if runLeft > 0
         centroidCol = 0.5 * (runLeft + runRight);   % 游程中点，而非像素质心
         rowMass = sum(rowBand(:, runLeft:runRight), 2);
@@ -324,10 +482,16 @@ for w = 1:windowCount
         winCols(w) = centroidCol;
         winRows(w) = centroidRow + pathTop - 1;     % 转回全图行号
         winValid(w) = true;
+        lineWidth = runRight - runLeft + 1;         % 供下一窗/下一帧使用
     else
-        % 空窗：按最近漂移速率外推列位置，继续向上找
+        % 空窗：按最近漂移速率外推列位置，继续向上找。**不更新 lineWidth**
+        % ——没有新实测值时保持上一个成功窗的宽度，而不是让半径漂移。
         currentCol = max(1, min(imageWidth, currentCol + lastDelta));
     end
+end
+
+if isnan(lineWidth)
+    lineWidth = NaN;    % 整帧一个窗都没成功：不要污染下一帧的种子
 end
 
 nearIdx = find(winValid, 1, "first");
