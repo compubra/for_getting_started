@@ -80,7 +80,15 @@ class LineFollowerControlNode(Node):
             # parameter means they cannot silently disagree.
             ts_control=float(self.get_parameter("control_period").value),
         )
-        self.controller = LineFollowerController(self.robot, controller_cfg, CurveSpeedGovernorConfig())
+        governor_cfg = CurveSpeedGovernorConfig(
+            heading_weight=float(self.get_parameter("curve_heading_weight").value),
+            lateral_weight=float(self.get_parameter("curve_lateral_weight").value),
+            slowdown_gain=float(self.get_parameter("curve_slowdown_gain").value),
+            slowdown_bias=float(self.get_parameter("curve_slowdown_bias").value),
+            min_speed_scale=float(self.get_parameter("curve_min_speed_scale").value),
+            max_speed_scale=float(self.get_parameter("curve_max_speed_scale").value),
+        )
+        self.controller = LineFollowerController(self.robot, controller_cfg, governor_cfg)
         self.controller.reset()
 
         # Safety layer + lost-line recovery, between the controller and the
@@ -181,6 +189,25 @@ class LineFollowerControlNode(Node):
         self.declare_parameter("base_linear_speed", ControllerConfig.base_linear_speed)
         self.declare_parameter("base_speed_scale", ControllerConfig.base_speed_scale)
         self.declare_parameter("max_angular_speed", ControllerConfig.max_angular_speed)
+        # Curve_Speed_Governor. Exposed 2026-08-10 for the same reason the
+        # three above were on 2026-07-31: the node built
+        # CurveSpeedGovernorConfig() from its bare dataclass defaults, so
+        # nothing written in the yaml reached it. Measured on this robot at
+        # kp 0.7 / kd 0 over two 60 s runs: speed is a -1.000-correlated
+        # function of |heading_error| (heading_weight 1.0 always beats
+        # lateral_weight 0.8 * a well-tracked lateral error), whose median on
+        # this track is 0.66-0.73 rad -- a real reading, the track's own
+        # curves are about 0.31 m in radius -- so slowdown_gain -0.9 held the
+        # robot at 34-41% speed as a matter of course and at the
+        # min_speed_scale 0.1 floor for 8-10% of each run. That is the visible
+        # "crawls through curves, and stops and starts" behaviour: 19-23
+        # excursions below 10 mm/s per minute.
+        self.declare_parameter("curve_heading_weight", CurveSpeedGovernorConfig.heading_weight)
+        self.declare_parameter("curve_lateral_weight", CurveSpeedGovernorConfig.lateral_weight)
+        self.declare_parameter("curve_slowdown_gain", CurveSpeedGovernorConfig.slowdown_gain)
+        self.declare_parameter("curve_slowdown_bias", CurveSpeedGovernorConfig.slowdown_bias)
+        self.declare_parameter("curve_min_speed_scale", CurveSpeedGovernorConfig.min_speed_scale)
+        self.declare_parameter("curve_max_speed_scale", CurveSpeedGovernorConfig.max_speed_scale)
         # If no local_path message arrives within this many seconds, treat
         # the input as lost (found=False, zeroed errors) rather than replay
         # stale data -- see the module docstring's "Network-dropout

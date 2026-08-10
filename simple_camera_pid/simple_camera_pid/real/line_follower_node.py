@@ -109,7 +109,18 @@ class LineFollowerNode(Node):
             base_speed_scale=self.get_parameter("base_speed_scale").value,
             max_angular_speed=self.get_parameter("max_angular_speed").value,
         )
-        self.controller = LineFollowerController(self.robot, controller_cfg, CurveSpeedGovernorConfig())
+        # Curve_Speed_Governor from parameters, not bare defaults -- see the
+        # matching comment in control_node.py's _declare_parameters for the
+        # measurement that made this necessary.
+        governor_cfg = CurveSpeedGovernorConfig(
+            heading_weight=float(self.get_parameter("curve_heading_weight").value),
+            lateral_weight=float(self.get_parameter("curve_lateral_weight").value),
+            slowdown_gain=float(self.get_parameter("curve_slowdown_gain").value),
+            slowdown_bias=float(self.get_parameter("curve_slowdown_bias").value),
+            min_speed_scale=float(self.get_parameter("curve_min_speed_scale").value),
+            max_speed_scale=float(self.get_parameter("curve_max_speed_scale").value),
+        )
+        self.controller = LineFollowerController(self.robot, controller_cfg, governor_cfg)
         self.controller.reset()
 
         # Same vision algorithm as the MuJoCo side. camera_profile selects the
@@ -264,6 +275,15 @@ class LineFollowerNode(Node):
         self.declare_parameter("base_linear_speed", ControllerConfig.base_linear_speed)
         self.declare_parameter("base_speed_scale", ControllerConfig.base_speed_scale)
         self.declare_parameter("max_angular_speed", ControllerConfig.max_angular_speed)
+        # Curve_Speed_Governor -- exposed 2026-08-10, same gap and same
+        # reasoning as the three above; see control_node.py's copy of this
+        # comment for the measurement.
+        self.declare_parameter("curve_heading_weight", CurveSpeedGovernorConfig.heading_weight)
+        self.declare_parameter("curve_lateral_weight", CurveSpeedGovernorConfig.lateral_weight)
+        self.declare_parameter("curve_slowdown_gain", CurveSpeedGovernorConfig.slowdown_gain)
+        self.declare_parameter("curve_slowdown_bias", CurveSpeedGovernorConfig.slowdown_bias)
+        self.declare_parameter("curve_min_speed_scale", CurveSpeedGovernorConfig.min_speed_scale)
+        self.declare_parameter("curve_max_speed_scale", CurveSpeedGovernorConfig.max_speed_scale)
         # Camera geometry: "gazebo" (default, 640x480 sim camera) or "real"
         # (a real robot's own camera -- see turtlebot3_burger_real_camera()'s
         # docstring in common/camera_geometry.py for how to fill in the

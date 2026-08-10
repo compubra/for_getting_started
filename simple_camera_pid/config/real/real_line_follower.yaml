@@ -255,9 +255,52 @@
     # first): 0.7, between the oscillating 1.0-2.0 range and the
     # pure-proportional (no kd/recovery_gain/integral) diagnostic's clean
     # 0.5.
+    # 2026-08-10, kd 0.35 -> 0.0. Everything above this line was measured
+    # with the control loop running at a median ~6 Hz while FilteredPID had
+    # ts=0.05 (20 Hz) baked into its derivative term -- see 80f951c. That
+    # inflated the D contribution roughly 3x, so the whole 5.0 -> 2.0 -> 1.0
+    # -> 1.5 -> 0.7 kp walk above was compensating an over-strong derivative,
+    # not a too-large proportional gain. With the loop now genuinely at
+    # 20.0 Hz (measured on /cmd_vel), six 60 s runs on this robot, safety
+    # filter off, first 10 s of each discarded as placement transient:
+    #
+    #   kp   kd    found   angRMS  sat    flips/s
+    #   0.7  1.00  0.234   0.691   0.294  -        (unusable: 29% of samples
+    #                                               at the angular ceiling,
+    #                                               left the track at t=23 s)
+    #   0.7  0.35  0.952   0.354   0.009  0.96
+    #   0.7  0.00  0.994   0.127   0.000  0.47
+    #   0.7  0.00  1.000   0.112   0.000  0.19     } same track section,
+    #   0.7  0.00  1.000   0.133   0.000  0.51     } repeat of one condition
+    #   1.5  0.00  0.854   0.375   0.000  0.91     } same section as those two
+    #
+    # kd is monotonically harmful here: 0 gives a found_rate of 1.000, an
+    # angular-command RMS a third of kd=0.35's, and never touches the
+    # max_angular_speed ceiling (peak 0.29-0.31 against a 1.0 limit). The
+    # 0.35 row's 0.009 saturation fraction and 1.000 peak are the same
+    # runaway mechanism, just smaller.
+    #
+    # Read the flips/s column with the repeat in mind: 0.19 and 0.51 are the
+    # SAME configuration on the SAME track section, so that metric alone
+    # cannot resolve a difference under about 2x. found_rate, angular RMS and
+    # lateral RMS repeated far more tightly and are what the kd conclusion
+    # rests on. By that standard kp=1.5's row is a consistent hint (worse on
+    # every column) but not a result -- it is a single run, and 0.7 is kept
+    # below only because nothing yet argues for moving it.
+    #
+    # ki stays 0.0 and was not tested: steering -> yaw rate -> heading is
+    # already an integration, so an I term makes it a double integrator, and
+    # the residual steady-state offset it would chase (lateral bias ~0.036,
+    # about 2 cm) is most likely the still-uncalibrated camera_roll_deg/
+    # camera_yaw_deg above -- a sensor bias, which ki would "fix" by steering
+    # the robot deliberately off-centre. Calibrate the mount instead.
+    #
+    # NOT established: whether some small kd (0.05-0.15) beats 0. That range
+    # was never run -- the session ended first. 0.0 is the best MEASURED
+    # value, not a proven optimum.
     kp: 0.7
     ki: 0.0
-    kd: 0.35
+    kd: 0.0
     n_filter: 20.0
 
     # base_linear_speed/base_speed_scale/max_angular_speed were NOT exposed
@@ -276,6 +319,46 @@
     base_linear_speed: 20.0
     base_speed_scale: 0.003
     max_angular_speed: 1.0
+
+    # Curve_Speed_Governor. Exposed as parameters 2026-08-10 -- until then
+    # the real nodes built CurveSpeedGovernorConfig() from its bare dataclass
+    # defaults, so these keys were unreachable from any yaml, exactly like
+    # base_linear_speed/base_speed_scale/max_angular_speed before 2026-07-31
+    # (see the comment above). The values below ARE those defaults, so this
+    # block changes no behaviour on its own.
+    #
+    # It is written down because the governor, not the PID, turned out to
+    # own the robot's most visible defect. Over all six 2026-08-10 runs the
+    # robot stopped and restarted 8.5-27 times per minute and spent 19-78%
+    # of each run below 20 mm/s, and the cause is not ambiguous: the
+    # correlation between |heading_error| and commanded linear speed is
+    # -1.000. heading_weight 1.0 * |heading_error| always beats
+    # lateral_weight 0.8 * a well-tracked lateral error (0.09), so speed is
+    # a pure function of heading_error alone.
+    #
+    # heading_error itself is not the bug -- its median of 0.66-0.74 rad is a
+    # real reading of a genuinely tight track (a 0.2 m lookahead subtending
+    # 0.7 rad implies a curve radius near 0.31 m, which matches this track),
+    # and it is smooth frame to frame (median step 0.010 rad). The mismatch
+    # is that slowdown_gain -0.9 was chosen for a track whose curves do not
+    # do that: at the MEASURED median heading it holds the robot at 34-41%
+    # speed as a matter of course, and at the +/-1.0 heading_error clamp
+    # (8-10% of every run) it pins it to the min_speed_scale 0.1 floor --
+    # 6 mm/s, indistinguishable from stopped.
+    #
+    # UNVERIFIED, DO NOT TREAT AS TUNED. The retune this analysis implies
+    # (slowdown_gain -0.5, min_speed_scale 0.35 -- predicted to lift the
+    # curve-speed scale from 0.41 to 0.67 at the median and from 0.10 to
+    # 0.50 at the clamp) was never run: the robot was shut down first. The
+    # governor exists for a reason, so raising these risks overshooting
+    # curves -- change them one step at a time and watch found_rate, which
+    # was 1.000 at kp 0.7 / kd 0 and is the thing that would break first.
+    curve_heading_weight: 1.0
+    curve_lateral_weight: 0.8
+    curve_slowdown_gain: -0.9
+    curve_slowdown_bias: 1.0
+    curve_min_speed_scale: 0.1
+    curve_max_speed_scale: 1.0
 
     # --- Safety layer + lost-line recovery (ported from MATLAB 2026-08-09).
     # Sits between the PID/residual command and the wheels. See
