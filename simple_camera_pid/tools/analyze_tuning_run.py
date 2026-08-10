@@ -486,6 +486,13 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     parser.add_argument('--deadband', type=float, default=0.02,
                         help='ignore |steering_error| below this when counting sign '
                              'flips (default 0.02)')
+    parser.add_argument('--skip', type=float, default=0.0,
+                        help='discard the first N seconds of each run. Hand-placing '
+                             'the robot repeats to only about +/-0.4 in steering_error '
+                             '(measured over three attempts at one "same" start pose), '
+                             'so the opening transient is a property of the placement, '
+                             'not of the gains -- skipping it is what makes two runs '
+                             'comparable.')
     parser.add_argument('--max-angular-speed', type=float, default=DEFAULT_MAX_ANGULAR_SPEED,
                         help='the run\'s max_angular_speed, for the saturation metric')
     parser.add_argument('--wheel-radius', type=float, default=DEFAULT_WHEEL_RADIUS)
@@ -506,6 +513,17 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         runs = [run_live(args.topic, args.window, args.report_every, metric_kwargs)]
     else:
         runs = [read_bag(bag, args.topic) for bag in args.bags]
+
+    if args.skip > 0.0:
+        trimmed = []
+        for r in runs:
+            keep = r.t >= r.t[0] + args.skip
+            if np.count_nonzero(keep) < 2:
+                raise SystemExit(f'{r.name}: --skip {args.skip}s leaves nothing to analyse')
+            trimmed.append(Samples(name=r.name, t=r.t[keep], data=r.data[keep],
+                                   has_wheels=r.has_wheels))
+        runs = trimmed
+        print(f'(first {args.skip:.0f}s of each run discarded as placement transient)')
 
     print()
     print_report([r.name for r in runs],
