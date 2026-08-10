@@ -109,6 +109,9 @@ class LineFollowerVisionNode(Node):
             max_saturation=self.get_parameter("max_saturation").value,
             min_pixels=self.get_parameter("min_pixels").value,
             error_scale=self.get_parameter("error_scale").value,
+            otsu_min_contrast=self.get_parameter("otsu_min_contrast").value,
+            adaptive_brightness_fraction=self.get_parameter(
+                "adaptive_brightness_fraction").value,
             roi_widen_step=self.get_parameter("roi_widen_step").value,
             roi_widen_max=self.get_parameter("roi_widen_max").value,
             image_height=image_height,
@@ -155,6 +158,11 @@ class LineFollowerVisionNode(Node):
         self.declare_parameter("max_saturation", 0.30)
         self.declare_parameter("min_pixels", 30.0)
         self.declare_parameter("error_scale", 500.0)
+        # 0.0 = min_brightness is a fixed floor (default since 2026-08-10);
+        # 0.55 restores MATLAB's adaptive-ceiling rule. See
+        # LineFollowerVision._brightness_threshold for the real-bag evidence.
+        self.declare_parameter("otsu_min_contrast", 0.0)
+        self.declare_parameter("adaptive_brightness_fraction", 0.0)
         self.declare_parameter("roi_widen_step", 0.2)
         self.declare_parameter("roi_widen_max", 0.7)
 

@@ -42,6 +42,15 @@ import numpy as np
 from scipy import ndimage
 from skimage.transform import probabilistic_hough_line
 
+try:
+    # Optional: only used for the uint8 fast path in _channel_extremes. Already
+    # a vision-layer dependency (requirements-vision.txt, and debug_frame.py
+    # imports it unconditionally), but kept guarded so this module -- which is
+    # shared with the MuJoCo and training lines -- still imports without it.
+    import cv2
+except ImportError:  # pragma: no cover
+    cv2 = None
+
 from .camera_geometry import CameraParams, pixel_to_ground, turtlebot3_burger_mujoco_camera
 
 MAX_PATH_POINTS = 30
@@ -117,6 +126,7 @@ class _DetectAttempt:
     valid: np.ndarray
     near_pixel_error: float
     base_col: float
+    line_width: float | None
 
 
 @dataclass
@@ -160,6 +170,23 @@ class LineFollowerVision:
     tuned roi_bottom_fraction=0.30/lookahead_distance=0.40 pair) this should
     essentially never trigger. Set to 0.0 to disable and restore the old
     single-attempt behavior."""
+    adaptive_brightness_fraction: float = 0.0
+    """0.0 (default) = ``min_brightness`` is used as a fixed floor. Set to
+    0.55 to restore MATLAB's ``min(min_brightness, max(40, 0.55*roi_max))``,
+    where it acts as a ceiling instead -- see ``_brightness_threshold`` for
+    the real-bag measurements behind the default. Ignored entirely when
+    ``otsu_min_contrast`` is on."""
+    otsu_min_contrast: float = 0.0
+    """0.0 (default) = off, use the ``min_brightness`` floor above. When > 0,
+    the brightness cut is chosen per frame by Otsu instead, and a frame whose
+    two Otsu classes differ in mean by less than this is reported as no
+    detection at all. Set 30.0 for this robot's dark-room track: measured
+    2026-08-10 over a recorded lap, frames with a line in view had a
+    class-mean gap of 123 (median, min 7 for the line-free ones), so 30 sits
+    in a wide empty band between the two populations. See ``_otsu_cut``.
+    Requires the gate -- Otsu alone will bisect pure noise and turn a
+    line-free frame into a confident false detection, which is the exact
+    failure this project already crashed on once."""
     roi_widen_max: float = 0.7
     """Ceiling for the widened retry (see ``roi_widen_step``) -- kept well
     below 0.95 so the widened attempt still can't reach up into the region
@@ -182,6 +209,7 @@ class LineFollowerVision:
     _last_local_path_debug: np.ndarray = field(default=None, init=False, repr=False)
     _lost_line_time: float = field(default=0.0, init=False, repr=False)
     _last_base_col: float | None = field(default=None, init=False, repr=False)
+    _last_line_width: float | None = field(default=None, init=False, repr=False)
     _steering_history: deque = field(
         default_factory=lambda: deque(maxlen=STEERING_TREND_SAMPLES), init=False, repr=False
     )
@@ -196,8 +224,52 @@ class LineFollowerVision:
         self._last_local_path_debug = np.zeros(DEBUG_WIDTH)
         self._lost_line_time = 0.0
         self._last_base_col = None
+        self._last_line_width = None
         self._steering_history.clear()
         self._lost_steering_slope = 0.0
+
+    def _brightness_threshold(self, roi_max: float) -> float:
+        """Value-channel cut for the line mask.
+
+        ``min_brightness`` is a FLOOR here. That is a deliberate 2026-08-10
+        departure from the MATLAB source
+        (``originbot_sliding_window_path_generator.m``, which still runs
+        ``min(minBrightness, max(40, 0.55*roiMaximum))`` -- port that change
+        across before trusting the two to agree again).
+
+        Why: in the MATLAB form ``min_brightness`` is a *ceiling*, so on
+        8-bit frames the applied cut can never exceed ``0.55*255 = 140.25``
+        and the configured 170 was unreachable -- the real cut was just
+        ``0.55*roi_max``, i.e. proportional to whatever the brightest pixel
+        in the ROI happened to be. Measured over three real bag runs
+        (2026-08-06/07, 434 sampled frames): the applied cut sat between 40
+        and 89, the mask covered 23-48% of the ROI on 10-32% of frames, and
+        on 27-50% of frames it fell at or below the ROI's own 90th-percentile
+        value -- i.e. the bare carpet was passing as line. The failure is
+        self-reinforcing: as the line leaves the ROI ``roi_max`` collapses to
+        the ground's own brightness, the cut drops with it, and the ground
+        becomes line-candidate at exactly the moment a clean ``found=False``
+        was wanted. That is the "confidently latched onto an unrelated white
+        object" mode in ``real_line_follower.yaml``'s kp log.
+
+        A fixed floor is only safe once the camera's exposure is locked
+        (``robot_bringup.launch.py``'s ``exposure_time``/``analogue_gain``,
+        added the same day) -- under auto-exposure a fixed cut blinds the
+        robot as soon as AE stops down. The two changes are one fix.
+
+        Set ``adaptive_brightness_fraction`` to 0.55 to restore the MATLAB
+        expression exactly.
+
+        Note this is a no-op for any already-tuned bright-scene deployment:
+        whenever ``fraction*roi_max >= min_brightness`` the old expression
+        already returned ``min_brightness``. For MuJoCo (min_brightness=70,
+        rendered white line at/near 255) that holds on every frame, so its
+        threshold is 70 before and after.
+        """
+        fraction = float(self.adaptive_brightness_fraction)
+        if fraction > 0.0:
+            return min(self.min_brightness, max(40.0, fraction * roi_max))
+        return float(self.min_brightness)
 
     def _estimate_steering_slope(self) -> float:
         """Rate of change of steering_error (per second) over the last
@@ -231,7 +303,13 @@ class LineFollowerVision:
         window_count = int(np.clip(round(self.waypoint_count), 2, MAX_PATH_POINTS))
         error_scale = max(np.finfo(float).eps, float(self.error_scale))
 
-        rgb = np.asarray(rgb, dtype=np.float64)
+        # Deliberately NOT converted to float64 here. This used to be
+        # `np.asarray(rgb, dtype=np.float64)`, which materialised a 7.4 MB
+        # copy of the whole frame (3.0 ms on the robot's Pi) when only the
+        # bottom `roi_bottom_fraction` of it is ever read, by _detect_mask.
+        # That method now does its own arithmetic in the incoming dtype --
+        # see its docstring for why the result is unchanged.
+        rgb = np.asarray(rgb)
         if rgb.shape != (self.image_height, self.image_width, 3):
             raise ValueError(
                 f"expected an ({self.image_height}, {self.image_width}, 3) image, got {rgb.shape}"
@@ -293,6 +371,8 @@ class LineFollowerVision:
             self._last_visible_steering = steering_error
             self._last_local_path_debug = local_path_debug
             self._last_base_col = attempt.base_col
+            if attempt.line_width is not None:
+                self._last_line_width = attempt.line_width
             self._steering_history.append(steering_error)
         else:
             just_lost = self._lost_line_time == 0.0
@@ -335,6 +415,7 @@ class LineFollowerVision:
                 # segment) rather than anchoring to a position that may no
                 # longer be anywhere near the line.
                 self._last_base_col = None
+                self._last_line_width = None
                 self._steering_history.clear()
                 self._lost_steering_slope = 0.0
 
@@ -374,9 +455,15 @@ class LineFollowerVision:
             base_col = float(peak_col) if peak_val > 0 else 0.5 * (self.image_width - 1)
             drift_per_row = 0.0
 
-        win_cols, win_rows, win_valid, near_pixel_error = _slide_windows(
+        win_cols, win_rows, win_valid, near_pixel_error, line_width = _slide_windows(
             mask, path_top, base_col, drift_per_row, window_count,
             self.camera.window_half_width, self.camera.min_window_pixels, center_x,
+            adaptive_window_gain=self.camera.adaptive_window_gain,
+            adaptive_radius_min=self.camera.adaptive_radius_min,
+            adaptive_radius_max=(self.camera.adaptive_radius_max_fraction
+                                 * self.camera.image_width),
+            max_drift_per_row=self.camera.max_drift_per_row,
+            prev_line_width=self._last_line_width,
         )
 
         x_points, y_points, valid, valid_count = self._project_windows(
@@ -390,21 +477,45 @@ class LineFollowerVision:
             total_pixels=total_pixels, valid_count=valid_count, found=found, confidence=confidence,
             win_cols=win_cols, win_rows=win_rows, win_valid=win_valid,
             x_points=x_points, y_points=y_points, valid=valid, near_pixel_error=near_pixel_error,
-            base_col=base_col,
+            base_col=base_col, line_width=line_width,
         )
 
     def _detect_mask(self, rgb: np.ndarray, path_top: int, path_bottom: int) -> tuple[np.ndarray, int]:
-        """Adaptive-brightness + low-saturation mask, filtered to its largest
+        """Brightness + low-saturation mask, filtered to its largest
         connected component. ``total_pixels`` is measured *before* that
         filter (matches the MATLAB source: it reflects all candidate-line
-        pixels, not just the largest blob)."""
+        pixels, not just the largest blob).
+
+        Arithmetic is done in the ROI's incoming dtype rather than a float64
+        copy of the whole frame, and the saturation test is rearranged from
+        ``(v - min) / max(v, 1) <= max_saturation`` into the equivalent
+        ``(v - min) <= max_saturation * max(v, 1)`` to drop the per-pixel
+        divide. ``v >= min`` holds elementwise by construction, so the
+        subtraction cannot underflow an unsigned dtype. Measured on the Pi:
+        30.1 ms -> 12.0 ms per frame for this block, with **0 differing
+        pixels** over 40 real bag frames (~3.7 M pixels) -- an empirical
+        check on real data, not a proof of bit-exactness for every possible
+        input.
+        """
         roi = rgb[path_top:path_bottom, :, :]
-        value = roi.max(axis=2)
-        minimum_channel = roi.min(axis=2)
-        saturation = (value - minimum_channel) / np.maximum(value, 1)
+        value, minimum_channel = _channel_extremes(roi)
         roi_max = value.max() if value.size else 0.0
-        adaptive_brightness = min(self.min_brightness, max(40.0, 0.55 * roi_max))
-        mask = (value >= adaptive_brightness) & (saturation <= self.max_saturation)
+
+        if self.otsu_min_contrast > 0.0:
+            brightness_threshold, contrast = _otsu_cut(value)
+            if brightness_threshold is None or contrast < self.otsu_min_contrast:
+                # Either no split was computable, or the two classes are too
+                # close together to be line-vs-ground -- Otsu will happily
+                # split pure sensor noise into "bright" and "dark", so
+                # without this gate a line-free frame becomes a confident
+                # false detection. Report nothing and let the caller's
+                # found=False path run.
+                return np.zeros(value.shape, dtype=bool), 0
+        else:
+            brightness_threshold = self._brightness_threshold(roi_max)
+
+        mask = ((value >= brightness_threshold)
+                & ((value - minimum_channel) <= self.max_saturation * np.maximum(value, 1)))
         total_pixels = int(mask.sum())
 
         if total_pixels > 0:
@@ -422,20 +533,88 @@ class LineFollowerVision:
         x_points = np.zeros(MAX_PATH_POINTS)
         y_points = np.zeros(MAX_PATH_POINTS)
         valid = np.zeros(MAX_PATH_POINTS, dtype=bool)
-        write_idx = 0
-        for k in range(window_count):
-            if not win_valid[k]:
-                continue
-            u_col = win_cols[k] + 1.0  # 0-indexed -> MATLAB's 1-indexed pixel convention
-            v_row = win_rows[k] + 1.0
-            xg, yg = pixel_to_ground(np.array([u_col]), np.array([v_row]), self.camera)
-            if np.isnan(xg[0]) or np.isnan(yg[0]):
-                continue
-            x_points[write_idx] = xg[0]
-            y_points[write_idx] = yg[0]
-            valid[write_idx] = True
-            write_idx += 1
+
+        # One vectorised projection instead of a per-window call. This loop
+        # used to call pixel_to_ground() once per valid window (up to 30
+        # times), and each call rebuilds the mount rotation via two
+        # scipy Rotation.from_euler() constructions -- 10.0 ms per frame on
+        # the Pi, against 0.33 ms for a single call on all 30 at once, with
+        # a max absolute difference of exactly 0.0 (checked over 30 random
+        # window positions). The compaction order below is unchanged: valid
+        # windows in ascending k, NaN projections dropped.
+        selected = np.flatnonzero(win_valid[:window_count])
+        if selected.size:
+            # 0-indexed -> MATLAB's 1-indexed pixel convention
+            xg, yg = pixel_to_ground(win_cols[selected] + 1.0, win_rows[selected] + 1.0,
+                                      self.camera)
+            finite = ~(np.isnan(xg) | np.isnan(yg))
+            write_count = int(finite.sum())
+            x_points[:write_count] = xg[finite]
+            y_points[:write_count] = yg[finite]
+            valid[:write_count] = True
         return x_points, y_points, valid, int(valid.sum())
+
+
+def _otsu_cut(value: np.ndarray) -> tuple[float | None, float]:
+    """Per-frame Otsu split of the ROI value channel.
+
+    Returns ``(threshold, contrast)`` where ``contrast`` is the gap between
+    the two class means -- the caller uses it to decide whether the split is
+    a real line-vs-ground boundary or just noise being bisected. Returns
+    ``(None, 0.0)`` when no usable split exists (empty ROI, or one class too
+    small to have a meaningful mean).
+
+    Why this exists: a single fixed ``min_brightness`` has to be one
+    compromise value for the whole track, and a dark room lights the track
+    unevenly enough that no such value is clean everywhere. Measured over a
+    whole recorded lap (2026-08-10, 407 sampled frames, lights off): a fixed
+    floor at its best setting (100-115) still threw away >10% of the line's
+    pixels on 19% of frames, against a 15% floor set by the frames that
+    genuinely had no line in view -- i.e. ~4% real misses. Per-frame Otsu
+    with this gate scored exactly 15%, i.e. no real misses, at the same zero
+    ground leakage.
+    """
+    if value.size == 0:
+        return None, 0.0
+    vu = value if value.dtype == np.uint8 else np.clip(value, 0, 255).astype(np.uint8)
+    if cv2 is not None:
+        threshold, _ = cv2.threshold(vu, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    else:
+        # Same criterion as cv2's, computed from the 256-bin histogram.
+        hist = np.bincount(vu.ravel(), minlength=256).astype(np.float64)
+        total = hist.sum()
+        omega = np.cumsum(hist) / total
+        mu = np.cumsum(hist * np.arange(256)) / total
+        mu_t = mu[-1]
+        denom = omega * (1.0 - omega)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            sigma_b = (mu_t * omega - mu) ** 2 / denom
+        sigma_b[~np.isfinite(sigma_b)] = -1.0
+        threshold = float(np.argmax(sigma_b))
+
+    high = vu >= threshold
+    n_high = int(high.sum())
+    if n_high == 0 or n_high == vu.size:
+        return None, 0.0
+    contrast = float(vu[high].mean()) - float(vu[~high].mean())
+    return float(threshold), contrast
+
+
+def _channel_extremes(roi: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Per-pixel max and min across the three colour channels.
+
+    ``roi.max(axis=2)``/``roi.min(axis=2)`` are surprisingly expensive on the
+    robot's Pi (a reduction along the smallest, non-contiguous axis): 11.7 ms
+    per frame for the pair at 640x144, against 1.8 ms for OpenCV's SIMD
+    two-argument max/min on the split channels. Verified identical output
+    (0 differing pixels over 12 real bag frames). Falls back to NumPy when
+    OpenCV is missing or the frame is not uint8 -- ``cv2.max``/``cv2.min``
+    do not accept float64, and ``step()`` documents float input as allowed.
+    """
+    if cv2 is not None and roi.dtype == np.uint8 and roi.ndim == 3 and roi.shape[2] == 3:
+        r, g, b = cv2.split(roi)
+        return cv2.max(cv2.max(r, g), b), cv2.min(cv2.min(r, g), b)
+    return roi.max(axis=2), roi.min(axis=2)
 
 
 def _hough_seed(
@@ -582,14 +761,28 @@ def _find_nearest_run(
 def _slide_windows(
     mask: np.ndarray, path_top: int, base_col: float, drift_per_row: float, window_count: int,
     half_width: float, min_window_pixels: float, center_x: float,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, float]:
+    adaptive_window_gain: float = 0.0, adaptive_radius_min: float = 8.0,
+    adaptive_radius_max: float = np.inf, max_drift_per_row: float = 3.0,
+    prev_line_width: float | None = None,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, float, float | None]:
     """Bottom-up sliding windows, each row band recentering on the midpoint
     of the nearest measured line-width run (see ``_find_nearest_run``);
     empty windows extrapolate via the last known column delta. Returns
     0-indexed window centroid columns/rows (rows already translated to
-    full-image coordinates), validity, and the nearest valid window's column
+    full-image coordinates), validity, the nearest valid window's column
     error from ``center_x`` (1-indexed, for direct use as the PID's
-    immediate-feedback term).
+    immediate-feedback term), and the last measured run width (``None`` if
+    no window succeeded) for the next frame to seed itself with.
+
+    Adaptive search radius (ported from ``slideWindows`` in
+    ``originbot_sliding_window_path_generator.m``, 2026-08-09; see
+    ``CameraParams.adaptive_window_gain`` for the rationale). The radius
+    carries forward from the **last successful window** rather than a
+    per-frame average, because perspective makes the line narrower in pixels
+    further away, so inheriting window-to-window shrinks the gate naturally
+    with distance. An empty window deliberately does NOT update the width --
+    with no new measurement, holding the last good one is better than
+    letting the radius drift.
     """
     roi_height, image_width = mask.shape
     window_height = max(2, int(np.floor(roi_height / window_count)))
@@ -601,13 +794,40 @@ def _slide_windows(
     current_col = base_col
     last_delta = -window_height * drift_per_row
 
+    adaptive = adaptive_window_gain > 0.0
+    drift_margin = max_drift_per_row * window_height
+    line_width = prev_line_width if (prev_line_width is not None and prev_line_width > 0) else None
+    # Cross-frame seed: the width of the FIRST (nearest) successful window,
+    # not the last. MATLAB returns the running `lineWidth`, which after the
+    # loop holds the *last* successful window -- the farthest and, by
+    # perspective, the narrowest -- and then uses it to size the next
+    # frame's first window, which is the nearest and widest. That is
+    # backwards from its own stated purpose ("首窗搜索半径的下一帧种子") and
+    # systematically under-gates the first window. Measured on the
+    # 2026-08-10 lap: it left the detected run touching the gate edge on
+    # 93% of window measurements with the fixed gate and 82% with the
+    # adaptive one, i.e. the run was being truncated by the gate rather
+    # than measured -- the same class of error as the 2026-08-05 undersized
+    # window, which is what this whole mechanism exists to avoid.
+    # Within a frame the running inheritance is kept exactly as MATLAB has
+    # it: it walks from near to far, so it shrinks with perspective, which
+    # is correct.
+    seed_width: float | None = None
+
     for w in range(window_count):
+        if adaptive and line_width is not None:
+            search_radius = max(adaptive_radius_min,
+                                min(adaptive_radius_max,
+                                    adaptive_window_gain * line_width + drift_margin))
+        else:
+            search_radius = half_width  # cold start, or adaptive disabled
+
         row_high = (roi_height - 1) - w * window_height   # window bottom (near), inclusive
         row_low = max(0, row_high - window_height + 1)    # window top (far), inclusive
         row_band = mask[row_low:row_high + 1, :]
         col_mass = row_band.sum(axis=0)
 
-        run = _find_nearest_run(col_mass, current_col, half_width, min_window_pixels)
+        run = _find_nearest_run(col_mass, current_col, search_radius, min_window_pixels)
         if run is not None:
             left, right, pixel_count = run
             centroid_col = 0.5 * (left + right)
@@ -619,6 +839,9 @@ def _slide_windows(
             win_cols[w] = centroid_col
             win_rows[w] = centroid_row + path_top  # ROI-local -> full-image row
             win_valid[w] = True
+            line_width = float(right - left + 1)
+            if seed_width is None:
+                seed_width = line_width
         else:
             current_col = max(0.0, min(image_width - 1.0, current_col + last_delta))
 
@@ -627,7 +850,7 @@ def _slide_windows(
         near_pixel_error = 0.0
     else:
         near_pixel_error = float((win_cols[near_idx[0]] + 1.0) - center_x)
-    return win_cols, win_rows, win_valid, near_pixel_error
+    return win_cols, win_rows, win_valid, near_pixel_error, seed_width
 
 
 def _fit_poly_lookahead(

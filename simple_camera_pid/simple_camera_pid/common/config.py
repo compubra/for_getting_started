@@ -119,6 +119,16 @@ class VisionConfig:
     max_saturation: float = 0.30         # OriginBot_MaxSaturation
     min_pixels: float = 30.0             # OriginBot_MinPixels
     error_scale: float = 500.0           # OriginBot_ErrorScale
+    # 0.0 = min_brightness above is a fixed FLOOR. 0.55 restores MATLAB's
+    # min(min_brightness, max(40, 0.55*roi_max)), in which it acts as a
+    # ceiling instead -- see LineFollowerVision._brightness_threshold
+    # (common/vision.py) for the real-bag measurements behind this default.
+    # 0.0 = off. >0 picks the brightness cut per frame by Otsu and rejects
+    # frames whose two class means differ by less than this (Otsu alone
+    # bisects noise and turns a line-free frame into a confident false
+    # detection). 30.0 measured on this robot -- see LineFollowerVision.
+    otsu_min_contrast: float = 0.0
+    adaptive_brightness_fraction: float = 0.0
     # Adaptive-ROI fallback, see LineFollowerVision.roi_widen_step. 0.0 =
     # disabled (restores the pre-2026-07-29 single-attempt behavior).
     roi_widen_step: float = 0.2

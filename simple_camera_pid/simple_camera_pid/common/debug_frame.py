@@ -23,7 +23,7 @@ import numpy as np
 from scipy import ndimage
 
 from .camera_geometry import CameraParams, ground_to_pixel, pixel_to_ground, turtlebot3_burger_mujoco_camera
-from .vision import _find_nearest_run, _hough_seed
+from .vision import _find_nearest_run, _hough_seed, _otsu_cut
 
 ROI_FOUND_COLOR = (0, 120, 255)       # blue ROI border when the line is found (RGB)
 ROI_LOST_COLOR = (255, 0, 0)          # red ROI border when the line is lost
@@ -46,18 +46,32 @@ def _to_uint8_rgb(rgb_input: np.ndarray, image_height: int, image_width: int) ->
 
 
 def _detect_mask(
-    rgb: np.ndarray, top_row: int, bottom_row: int, min_brightness: float, max_saturation: float
+    rgb: np.ndarray, top_row: int, bottom_row: int, min_brightness: float, max_saturation: float,
+    adaptive_brightness_fraction: float = 0.0, otsu_min_contrast: float = 0.0,
 ) -> tuple[np.ndarray, int]:
-    """Mirrors ``vision.LineFollowerVision._detect_mask``: adaptive-brightness
-    + low-saturation test, filtered to the largest connected component.
-    ``total_pixels`` is measured before that filter, matching the control path."""
+    """Mirrors ``vision.LineFollowerVision._detect_mask``: brightness +
+    low-saturation test, filtered to the largest connected component.
+    ``total_pixels`` is measured before that filter, matching the control path.
+
+    ``adaptive_brightness_fraction`` must track the control path's value or
+    this overlay stops showing what the controller actually sees -- the whole
+    point of the node. See ``LineFollowerVision._brightness_threshold``."""
     roi = rgb[top_row:bottom_row, :, :].astype(np.float64)
     value = roi.max(axis=2)
     minimum_channel = roi.min(axis=2)
     saturation = (value - minimum_channel) / np.maximum(value, 1)
     roi_max = value.max() if value.size else 0.0
-    adaptive_brightness = min(min_brightness, max(40.0, 0.55 * roi_max))
-    mask = (value >= adaptive_brightness) & (saturation <= max_saturation)
+    if otsu_min_contrast > 0.0:
+        cut, contrast = _otsu_cut(value)
+        if cut is None or contrast < otsu_min_contrast:
+            return np.zeros(value.shape, dtype=bool), 0
+        brightness_threshold = cut
+    elif adaptive_brightness_fraction > 0.0:
+        brightness_threshold = min(min_brightness,
+                                    max(40.0, adaptive_brightness_fraction * roi_max))
+    else:
+        brightness_threshold = float(min_brightness)
+    mask = (value >= brightness_threshold) & (saturation <= max_saturation)
     total_pixels = int(mask.sum())
 
     if total_pixels > 0:
@@ -73,6 +87,8 @@ def _detect_mask(
 def _slide_windows_debug(
     mask: np.ndarray, path_top: int, base_col: float, drift_per_row: float, window_count: int,
     half_width: float, min_window_pixels: float,
+    adaptive_window_gain: float = 0.0, adaptive_radius_min: float = 8.0,
+    adaptive_radius_max: float = np.inf, max_drift_per_row: float = 3.0,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Mirrors ``vision._slide_windows`` (see its docstring and
     ``_find_nearest_run``'s for the 2026-08-05 adaptive-width change),
@@ -92,7 +108,19 @@ def _slide_windows_debug(
     current_col = base_col
     last_delta = -window_height * drift_per_row
 
+    # Same adaptive search radius as vision._slide_windows -- see its
+    # docstring. This overlay has no cross-frame state, so it always cold
+    # starts from half_width on the first window of every frame; the control
+    # path additionally seeds it from the previous frame's measured width.
+    adaptive = adaptive_window_gain > 0.0
+    drift_margin = max_drift_per_row * window_height
+    line_width = None
+
     for w in range(window_count):
+        if adaptive and line_width is not None:
+            half_width = max(adaptive_radius_min,
+                             min(adaptive_radius_max,
+                                 adaptive_window_gain * line_width + drift_margin))
         row_high = (roi_height - 1) - w * window_height
         row_low = max(0, row_high - window_height + 1)
         row_band = mask[row_low:row_high + 1, :]
@@ -111,6 +139,7 @@ def _slide_windows_debug(
             win_cols[w] = centroid_col
             win_rows[w] = centroid_row + path_top
             win_valid[w] = True
+            line_width = float(right - left + 1)
         else:
             col_low = max(0, int(round(current_col - half_width)))
             col_high = min(image_width - 1, int(round(current_col + half_width)))
@@ -124,6 +153,7 @@ def _detect_attempt_debug(
     rgb: np.ndarray, roi_bottom_fraction: float, window_count: int,
     min_brightness: float, max_saturation: float, min_pixels: float,
     camera: CameraParams, image_height: int, image_width: int,
+    adaptive_brightness_fraction: float = 0.0, otsu_min_contrast: float = 0.0,
 ):
     """Debug-path twin of ``vision.LineFollowerVision._detect_attempt`` --
     same mask -> Hough-seed -> sliding-window -> ground-projection pass, but
@@ -133,7 +163,9 @@ def _detect_attempt_debug(
     path_top = int(np.clip(np.floor((1 - roi_bottom_fraction) * image_height), 0, image_height - 1))
     path_bottom = image_height
 
-    mask, total_pixels = _detect_mask(rgb, path_top, path_bottom, min_brightness, max_saturation)
+    mask, total_pixels = _detect_mask(rgb, path_top, path_bottom, min_brightness,
+                                       max_saturation, adaptive_brightness_fraction,
+                                       otsu_min_contrast)
 
     base_col, drift_per_row, hough_found = _hough_seed(
         mask, camera.hough_min_length, camera.hough_fill_gap, camera.max_drift_per_row
@@ -150,6 +182,9 @@ def _detect_attempt_debug(
     win_cols, win_rows, win_valid, win_rects = _slide_windows_debug(
         mask, path_top, base_col, drift_per_row, window_count,
         camera.window_half_width, camera.min_window_pixels,
+        camera.adaptive_window_gain, camera.adaptive_radius_min,
+        camera.adaptive_radius_max_fraction * camera.image_width,
+        camera.max_drift_per_row,
     )
 
     x_valid, y_valid = [], []
@@ -180,6 +215,7 @@ def render_debug_frame(
     flip_vertical: bool = True,
     roi_widen_step: float = 0.2,
     roi_widen_max: float = 0.7,
+    adaptive_brightness_fraction: float = 0.0, otsu_min_contrast: float = 0.0,
 ) -> np.ndarray:
     """Build an RGB debug frame (uint8, HxWx3) matching the MATLAB overlay:
 
@@ -215,6 +251,7 @@ def render_debug_frame(
      x_valid, y_valid, found) = _detect_attempt_debug(
         rgb, roi_bottom_fraction, window_count,
         min_brightness, max_saturation, min_pixels, camera, image_height, image_width,
+        adaptive_brightness_fraction, otsu_min_contrast,
     )
     widen_step = max(0.0, float(roi_widen_step))
     if not found and widen_step > 0.0:
@@ -225,6 +262,7 @@ def render_debug_frame(
             wide = _detect_attempt_debug(
                 rgb, widened_fraction, window_count,
                 min_brightness, max_saturation, min_pixels, camera, image_height, image_width,
+                adaptive_brightness_fraction, otsu_min_contrast,
             )
             if wide[-1]:  # found
                 (path_top, path_bottom, mask, win_cols, win_rows, win_valid, win_rects,
