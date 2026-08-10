@@ -92,35 +92,115 @@
     # derived from only two real frames (one clean, one mid-crash) -- re-tune
     # against a fuller real-track sample if false positives recur.
     #
-    # 2026-08-07 MERGE NOTE -- READ BEFORE THE NEXT REAL RUN. The 170/0.20
-    # above and the kp: 0.7 below have NEVER RUN TOGETHER on the robot. The
-    # Pi was working from a branch point that predated the 170/0.20 change,
-    # so every kp run in that tuning log (2.0 -> 1.0 -> 1.5 -> 0.7) was
-    # driven with min_brightness=70 / max_saturation=0.30 -- i.e. with
-    # exactly the segmentation that this comment block documents as
-    # flagging ~half the ground as line-candidate. That means the
-    # "oscillation" those runs measured (0.70-0.78 steering-sign-flips/sec)
-    # may be partly or wholly the sliding window snapping between the real
-    # line and a false region, NOT underdamped control -- which would make
-    # kp: 0.7 a compensation for a bug that no longer exists here.
-    # So: re-run the kp sweep at 170/0.20 before trusting 0.7. If the
-    # oscillation is gone at 170/0.20, walk kp back UP toward 2.0 rather
-    # than keeping 0.7 (0.7 undershot real curves once already at
-    # min_brightness=70 -- see the kp comment below). To reproduce the Pi's
-    # exact last-tested configuration instead, set min_brightness: 70.0 /
-    # max_saturation: 0.30 here and leave kp at 0.7 -- but understand
-    # that combination is the one the 2026-08-04 bag analysis argues
-    # against.
+    # 2026-08-10 CORRECTION -- the 2026-08-04 entry above is wrong about what
+    # min_brightness does, and the 2026-08-07 note below it was written on
+    # that wrong understanding.
+    #
+    # In the MATLAB expression this port carried over,
+    #   adaptive = min(min_brightness, max(40, 0.55*roi_max))
+    # min_brightness is a CEILING, not a floor. On 8-bit frames the applied
+    # cut therefore could never exceed 0.55*255 = 140.25, so the 170 written
+    # here was unreachable -- what actually ran was the bare 0.55*roi_max,
+    # i.e. a cut proportional to the ROI's brightest pixel. Raising 70 -> 170
+    # did change behaviour, but not to "a fixed 170": it switched a fixed cut
+    # of 70 for a fully floating one between 40 and 140.
+    #
+    # Re-measured against the real bags (2026-08-06/07 runs, 434 sampled
+    # frames): the applied cut ranged 40-89; the mask covered 23-48% of the
+    # ROI on 10-32% of frames; on 27-50% of frames it sat at or below the
+    # ROI's own 90th-percentile value, i.e. bare carpet was passing as line;
+    # and the white line itself never read above 162 anywhere in those runs.
+    # The failure mode is self-reinforcing -- as the line leaves the ROI,
+    # roi_max collapses to the ground's own brightness, the cut drops with
+    # it, and the ground becomes line-candidate at exactly the moment a clean
+    # found=False was wanted. That is the "confidently latched onto an
+    # unrelated white object" run in the kp log below.
+    #
+    # Two changes, which only work as a pair:
+    #   1. vision.py's min_brightness is now a FLOOR
+    #      (adaptive_brightness_fraction: 0.0 below restores nothing; set it
+    #      to 0.55 to get the old ceiling rule back).
+    #   2. The camera's exposure is now LOCKED in
+    #      launch/real/robot_bringup.launch.py (exposure_time: 24000 us,
+    #      analogue_gain: 2.0). A fixed floor is only safe with a fixed
+    #      exposure -- under auto-exposure it blinds the robot the moment AE
+    #      stops down, and the bag numbers above are what AE was doing.
+    # Measured live 2026-08-10 with both in place, robot stationary and
+    # centred on the track, lab lights ON: line value p10 201 / p50 207,
+    # ground p99 114 / max 126, line saturation p90 0.048, found rate 100%,
+    # applied cut a flat 170.0 on every frame (it used to wander), and
+    # frame-to-frame |d steering_error| 4x lower than under the old rule
+    # (mean 0.0006 vs 0.0024, max 0.0022 vs 0.0240).
+    #
+    # This is also why the lab no longer has to be run with the lights off:
+    # that was a workaround for AE re-metering, not for the lighting itself.
+    #
+    # STILL TRUE from the 2026-08-07 note: 170/0.20 and kp: 0.7 have never
+    # run together on the robot, and every kp run in the log below (2.0 ->
+    # 1.0 -> 1.5 -> 0.7) was driven with min_brightness=70 /
+    # max_saturation=0.30 AND auto-exposure AND a control loop that was
+    # actually ticking at 1.8-21 Hz rather than 20 (see kp's own comment).
+    # Re-run the kp sweep before trusting any of those numbers.
     roi_bottom_fraction: 0.3
     num_points: 30
     lookahead_distance: 0.20
     lateral_gain: 0.6
     heading_gain: 0.35
     curvature_gain: 0.04
-    min_brightness: 170.0
+    # 2026-08-10, LIGHTS-OFF ROOM. min_brightness pairs with the exposure
+    # lock in robot_bringup.launch.py -- they are ONE calibration, changing
+    # either alone breaks detection. Two measured pairs:
+    #
+    #   lights OFF (current default): frame_duration 50000 (20 fps) /
+    #     exposure_time 49000 / analogue_gain 10.0  ->  min_brightness 105
+    #     line p10 130, p50 139, line saturation p90 0.140;
+    #     ground p99 58, max 81.  Floor 105 sits mid-gap, ~24 either side.
+    #
+    #   lights ON: frame_duration 33333 (30 fps) / exposure_time 24000 /
+    #     analogue_gain 2.0  ->  min_brightness 170
+    #     line p10 201, p50 207, line saturation p90 0.048;
+    #     ground p99 114, max 126.  Strictly the better of the two -- bigger
+    #     gap, and 3x the saturation margin. Prefer it when there is time.
+    #
+    # Do NOT mix them: 105 with the lights on lets the ground through (it
+    # reaches 126 there), and 170 with the lights off finds nothing at all
+    # (the line only reaches ~146 under AE, ~139 locked -- measured, the
+    # mask came out 0.00% of the ROI).
+    #
+    # max_saturation 0.20 holds for both, but the margin is much thinner in
+    # the dark: the line's own saturation is 0.140 there against 0.048 with
+    # the lights on, because saturation is dominated by how dark the pixel
+    # is, not by gain. If the line starts dropping out in the dark, raise
+    # this before touching min_brightness.
+    min_brightness: 105.0
     max_saturation: 0.20
     min_pixels: 30.0
     error_scale: 500.0
+    # 0.0 = min_brightness above is a hard floor (see the 2026-08-10
+    # correction). 0.55 restores MATLAB's adaptive-ceiling rule exactly --
+    # verified bit-identical to the pre-2026-08-10 code on 120 real bag
+    # frames, so it is a clean A/B if you want to compare on the robot.
+    # 2026-08-10, validated by replaying the whole lap_20260810_140059 lap
+    # through LineFollowerVision (825 frames: 703 with a line in view, 122
+    # without, ground truth = Otsu class-mean gap >= 30):
+    #
+    #   fixed floor 105 : 703/703 real lines found, but 11/122 FALSE
+    #                     POSITIVES on line-free frames   39.0 ms/frame
+    #   otsu + gate 30  : 703/703 real lines found, 0/122 false positives
+    #                                                    40.5 ms/frame
+    #
+    # The false positives are the failure this project has crashed on twice
+    # (the sliding window latching onto bare ground / an unrelated white
+    # object). Otsu removes all of them for +1.5 ms and no lost detections,
+    # so it is on. min_brightness above is UNUSED while this is > 0.
+    #
+    # The gate is not optional: Otsu always returns a split, so on a
+    # line-free frame it bisects sensor noise and hands back a confident
+    # detection. 30 sits in the empty band between the two measured
+    # populations (line in view: class-mean gap 123 median; line-free: under
+    # 30, max 29). Set otsu_min_contrast: 0.0 to go back to the fixed floor.
+    otsu_min_contrast: 30.0
+    adaptive_brightness_fraction: 0.0
     roi_widen_step: 0.2
     roi_widen_max: 0.7
 
@@ -266,6 +346,14 @@ line_follower_node:
     image_topic: /camera/image_raw
     cmd_vel_topic: /cmd_vel
     diagnostic_topic: /line_follower/debug
+    # No camera frame within this many seconds -> command the controller's
+    # not-found path instead of re-running vision on a stale frame. Added
+    # 2026-08-10; this node previously had no camera watchdog at all (the
+    # split deployment's control_node always had the network equivalent), so
+    # a camera driver dying mid-run left the robot executing its last
+    # found=True command indefinitely -- turtlebot3_node has no command
+    # timeout of its own. Matches control_node's watchdog_timeout.
+    camera_timeout: 1.0
 
 # --- Split deployment: vision_node runs on the Pi (next to the camera) ---
 line_follower_vision_node:

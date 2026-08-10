@@ -165,6 +165,9 @@ class LineFollowerNode(Node):
             max_saturation=self.get_parameter("max_saturation").value,
             min_pixels=self.get_parameter("min_pixels").value,
             error_scale=self.get_parameter("error_scale").value,
+            otsu_min_contrast=self.get_parameter("otsu_min_contrast").value,
+            adaptive_brightness_fraction=self.get_parameter(
+                "adaptive_brightness_fraction").value,
             roi_widen_step=self.get_parameter("roi_widen_step").value,
             roi_widen_max=self.get_parameter("roi_widen_max").value,
             image_height=image_height,
@@ -193,7 +196,18 @@ class LineFollowerNode(Node):
                 residual_path, self.get_parameter("residual_algo").value, obs_space, action_space,
             )
 
-        self._last_vision = None  # LocalPathResult, updated by _image_callback
+        self._latest_frame = None        # newest RGB frame, written by _image_callback
+        self._latest_frame_stamp = None  # rclpy.time.Time of that frame
+        self._last_vision = None         # LocalPathResult, updated by _on_timer
+
+        # If the camera stops publishing, treat it as line-loss rather than
+        # driving on an arbitrarily old frame. The split deployment's
+        # control_node has always had this (see its module docstring); this
+        # node did not, so a camera driver that died mid-run left the timer
+        # re-using the last frame's found=True result forever and the robot
+        # kept executing that command -- turtlebot3_node has no command
+        # watchdog of its own. Same 1.0 s default and same meaning.
+        self._camera_timeout = float(self.get_parameter("camera_timeout").value)
 
         # cmd_vel_stamped: plain Twist is the historical default (it is what
         # the since-removed Gazebo ros_gz_bridge wanted), but this project's
@@ -221,6 +235,11 @@ class LineFollowerNode(Node):
 
     def _declare_parameters(self) -> None:
         self.declare_parameter("image_topic", "/camera/image_raw")
+        # No camera frame within this many seconds -> treat as line-loss
+        # (found=False) instead of re-running vision on a stale frame. Mirrors
+        # control_node.py's watchdog_timeout, which guards the analogous
+        # network dropout in the split deployment.
+        self.declare_parameter("camera_timeout", 1.0)
         self.declare_parameter("cmd_vel_topic", "/cmd_vel")
         self.declare_parameter("diagnostic_topic", "/line_follower/debug")
         # False (default): plain Twist. True:
@@ -280,6 +299,11 @@ class LineFollowerNode(Node):
         # docstring): if roi_bottom_fraction finds nothing this frame, retry
         # once with the ROI widened by this much (0.0 = disabled, restores
         # the old single-attempt behavior).
+        # 0.0 = min_brightness is a fixed floor (default since 2026-08-10);
+        # 0.55 restores MATLAB's adaptive-ceiling rule. See
+        # LineFollowerVision._brightness_threshold for the real-bag evidence.
+        self.declare_parameter("otsu_min_contrast", 0.0)
+        self.declare_parameter("adaptive_brightness_fraction", 0.0)
         self.declare_parameter("roi_widen_step", 0.2)
         self.declare_parameter("roi_widen_max", 0.7)
         # Optional inference-only SAC/PPO residual policy (see
@@ -294,10 +318,26 @@ class LineFollowerNode(Node):
         self.declare_parameter("residual_use_2d_action", False)
 
     def _image_callback(self, msg: Image) -> None:
+        """Buffer the newest frame only -- the vision pass itself runs in
+        ``_on_timer``.
+
+        This callback used to call ``self.vision.step(rgb)`` directly, which
+        contradicted this module's own docstring and had two costs on real
+        hardware. (1) ``LineFollowerVision`` advances its lost-line state
+        machine by a fixed ``CONTROL_PERIOD`` (0.05 s) per call, so running it
+        per frame made FREEZE_TIMEOUT/SLOWDOWN_TIMEOUT mean "10/30 frames"
+        rather than "0.5/1.5 s" -- at the camera's measured 15-30 Hz those
+        disagreed with the controller's own lost_speed_* timeouts, which are
+        driven by this timer and were correct. (2) It ran the (then ~61 ms)
+        vision pass at camera rate instead of control rate, starving the
+        20 Hz timer: /cmd_vel in the 2026-08-04..07 bags came out at
+        1.8-21 Hz (median ~6) while /odom held a steady 20 Hz.
+        """
         rgb = _image_msg_to_rgb(msg)
         if rgb is None:
             return
-        self._last_vision = self.vision.step(rgb)
+        self._latest_frame = rgb
+        self._latest_frame_stamp = self.get_clock().now()
 
     def _residual_action(self) -> Tuple[float, float]:
         """Returns ``(delta_v, delta_omega)``; ``delta_v`` is 0.0 whenever no
@@ -324,8 +364,33 @@ class LineFollowerNode(Node):
         return delta_v, delta_omega
 
     def _on_timer(self) -> None:
-        if self._last_vision is None:
+        if self._latest_frame is None:
             return  # no camera frame received yet
+
+        stale = (
+            self._latest_frame_stamp is None
+            or (self.get_clock().now() - self._latest_frame_stamp).nanoseconds
+            > self._camera_timeout * 1e9
+        )
+        if stale:
+            # Do not re-run vision on the old frame: that would keep
+            # re-deriving found=True from it. Step the controller's
+            # not-found/recovery path instead, exactly as control_node does
+            # when the network drops.
+            self._last_vision = None
+            wheel_cmd = self.controller.step(
+                steering_error=0.0, found=False, heading_error=0.0, lateral_error=0.0,
+            )
+            self._prev_wheel_command = (wheel_cmd.left, wheel_cmd.right)
+            linear = self.robot.wheel_radius * (wheel_cmd.left + wheel_cmd.right) / 2.0
+            angular = (self.robot.wheel_radius * (wheel_cmd.right - wheel_cmd.left)
+                       / self.robot.wheel_separation)
+            self.cmd_pub.publish(self._make_cmd_vel(linear, angular))
+            return
+
+        # Sample-and-hold: one vision pass per control tick, on whatever
+        # frame is newest -- see _image_callback's docstring.
+        self._last_vision = self.vision.step(self._latest_frame)
         vision = self._last_vision
         residual_delta_v, residual_delta_omega = self._residual_action()
 

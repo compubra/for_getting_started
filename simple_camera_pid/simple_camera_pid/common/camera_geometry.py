@@ -36,6 +36,52 @@ class CameraParams:
     default_lookahead: float    # LocalPath_LookaheadDistance fallback (m)
     hough_max_peaks: int = 4        # platform-independent
     max_drift_per_row: float = 3.0  # platform-independent, a ratio (not px-scaled)
+    # Adaptive sliding-window search radius, ported from
+    # originbot_camera_profile.m's 2026-08-09 block (which sets all three
+    # after its platform switch, i.e. they are platform-independent there
+    # too). Since _find_nearest_run measures the line's run width on every
+    # row, the search gate no longer has to be a hand-tuned per-platform
+    # constant -- it is derived from that measurement instead:
+    #
+    #   radius = clamp(gain * measured_width + max_drift_this_window,
+    #                  radius_min, radius_max_fraction * image_width)
+    #
+    # The drift term is max_drift_per_row * window_height, i.e. the largest
+    # column shift the Hough slope clamp permits within one window, so the
+    # radius always covers "line width + how far this window may move".
+    # The upper bound is a fraction of image width rather than an absolute
+    # pixel count so it survives a resolution change untouched.
+    # Set adaptive_window_gain=0.0 to disable and fall back to the fixed
+    # window_half_width (the pre-2026-08-09 behavior). window_half_width is
+    # still used even when this is on: it seeds the very first window of a
+    # frame, before there is any measured width to work from.
+    adaptive_window_gain: float = 1.5
+    adaptive_radius_min: float = 8.0          # px floor, so a thin line can't close the gate
+    # x image_width. MATLAB uses 0.30 (640 -> 192); this is 0.40 (-> 256),
+    # a deliberate divergence measured on the 2026-08-10 lap (976 frames,
+    # 18k window measurements). The number that matters is how often the
+    # gate TRUNCATES the run instead of containing it -- when it does, the
+    # midpoint collapses toward the gate centre and the window stops
+    # re-centring on the line, which is the same failure the 2026-08-05
+    # undersized-window fix was about:
+    #
+    #   fixed 180px gate      43.5% of runs truncated by the gate
+    #   adaptive, 0.30w       29.3%
+    #   adaptive, 0.35w        8.6%
+    #   adaptive, 0.40w        5.0%   <- here, past the knee
+    #   adaptive, 0.45w        3.8%
+    #   adaptive, 0.60w        2.4%   (gate ~= whole image by then)
+    #
+    # 0.30 is too low for this track because the white path measures 275 px
+    # wide (median) on a 640 px frame, so gain*width alone wants 424 px and
+    # the ceiling binds on every near window. Stopping at 0.40 rather than
+    # going higher keeps the gate meaningfully narrower than the frame, so
+    # it still does its original job of refusing to jump to an unrelated
+    # bright region elsewhere in the row -- the failure behind the "locked
+    # onto a white object across the room" run in real_line_follower.yaml.
+    # Detection was 634/634 with 0 false positives at every value tested,
+    # so this is a measurement-fidelity fix, not a detection-rate one.
+    adaptive_radius_max_fraction: float = 0.40
     max_ground_range: float = 5.0   # discard projections beyond this forward distance (m)
     roll_deg: float = 0.0    # mount roll about the camera's forward/optical axis (deg), 0 = no roll
     yaw_deg: float = 0.0     # mount yaw about the true-vertical axis (deg), 0 = no yaw

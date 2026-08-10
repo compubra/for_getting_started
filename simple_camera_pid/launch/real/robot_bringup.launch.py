@@ -70,6 +70,25 @@ Arguments
                             Vision/camera tuning YAML for vision_debug_node
                           (default config/real/real_line_follower.yaml, same
                           file the real controller nodes read).
+    auto_exposure           Leave libcamera AE/AGC on (default false). The
+                          default LOCKS exposure -- this is what replaces
+                          "turn the lab lights off" as the way to stop the
+                          camera re-metering mid-lap. See the argument's own
+                          description below for the measurements.
+    exposure_time           Manual ExposureTime in microseconds (default
+                          49000). Ignored when auto_exposure:=true.
+    analogue_gain           Manual AnalogueGain (default 10.0). Ignored when
+                          auto_exposure:=true. AWB stays on deliberately.
+    frame_duration          FrameDurationLimits in microseconds, min=max
+                          (default 50000 = 20 fps), which is what lets
+                          exposure_time exceed the 33333 us ceiling 30 fps
+                          imposes.
+                          THE THREE ABOVE DEFAULT TO THE LIGHTS-OFF ROOM
+                          measured 2026-08-10. With the room lights ON use
+                          exposure_time:=24000 analogue_gain:=2.0
+                          frame_duration:=33333 AND set min_brightness back to
+                          170 in real_line_follower.yaml -- the exposure and
+                          the mask floor are one calibration, see that file.
     orientation              camera_ros/libcamera "orientation" control: 0, 90,
                           180, or 270 degrees (default 180 -- this robot's
                           camera is physically mounted upside-down, confirmed
@@ -183,6 +202,40 @@ def _make_camera_container(context, *args, **kwargs):
             )
         camera_parameters['ScalerCrop'] = crop_values
 
+    # Exposure lock. See auto_exposure's argument description below for why
+    # this is not optional for line following, and how to re-measure the two
+    # numbers. Both mode controls must be set: on libcamera 0.5.2 (this Pi)
+    # ExposureTimeMode/AnalogueGainMode take precedence over AeEnable in
+    # camera_ros's ParameterConflictHandler, so setting AeEnable:=false alone
+    # leaves ExposureTime rejected with "must not be set simultaneously" and
+    # the camera silently stays on auto. 1 == Manual for both.
+    # These have to be passed at node construction, not via ros2 param set
+    # afterwards: camera_ros applies queued control values on the next
+    # capture request and drops any that arrive before the previous set has
+    # been consumed ("previous parameters have note been apllied yet and
+    # will be ignored"), which makes runtime setting unreliable.
+    if context.perform_substitution(LaunchConfiguration('auto_exposure')).lower() \
+            not in ('true', '1'):
+        camera_parameters['ExposureTimeMode'] = 1
+        camera_parameters['AnalogueGainMode'] = 1
+        camera_parameters['ExposureTime'] = LaunchConfiguration('exposure_time')
+        camera_parameters['AnalogueGain'] = LaunchConfiguration('analogue_gain')
+
+    # FrameDurationLimits caps how long ExposureTime is allowed to be: at the
+    # default 30 fps the ceiling is 33333 us, and in a dim room that forces
+    # the shortfall onto AnalogueGain. That is the worse trade -- measured in
+    # the dark 2026-08-10, 33000 us x8.0 gave a line of only 93 with
+    # saturation p90 0.213 (past max_saturation 0.20), because saturation
+    # here is dominated by how dark the pixel is, not by gain as such. The
+    # control loop only consumes 20 Hz (sample-and-hold in
+    # line_follower_node), so trading frame rate for exposure time is free
+    # down to 20 fps. Set both limits equal to pin the rate exactly.
+    frame_duration_str = context.perform_substitution(
+        LaunchConfiguration('frame_duration')).strip()
+    if frame_duration_str:
+        fd = int(frame_duration_str)
+        camera_parameters['FrameDurationLimits'] = [fd, fd]
+
     camera_container = ComposableNodeContainer(
         name='camera_container',
         namespace='',
@@ -286,6 +339,76 @@ def generate_launch_description():
                         'output scaling/cropping, so width/height/scaler_crop '
                         'above are unaffected. Pass orientation:=0 if the mount '
                         'is ever corrected/reversed.',
+        ),
+        DeclareLaunchArgument(
+            'auto_exposure', default_value='false',
+            description='Leave libcamera auto-exposure/auto-gain on. Default '
+                        'false -- AE is actively harmful for this line '
+                        'follower and locking it is what removes the need to '
+                        'run the lab with the lights off. The scene is a '
+                        'near-black carpet with a white tape line, so AE '
+                        'meters almost entirely on how much line is currently '
+                        'in view: with the line filling the near field it '
+                        'stops down, and as the line leaves the frame it opens '
+                        'up and lifts the bare carpet into the same brightness '
+                        'band as the line. vision.py then compounds it, '
+                        'because its mask cut used to be proportional to the '
+                        "ROI's brightest pixel (see "
+                        'LineFollowerVision._brightness_threshold). Measured '
+                        'over three 2026-08-06/07 bags: the applied cut ranged '
+                        '40-89, the mask covered 23-48% of the ROI on 10-32% '
+                        'of frames, and the white line itself never read above '
+                        '162. Set true only to reproduce that old behaviour.',
+        ),
+        DeclareLaunchArgument(
+            'exposure_time', default_value='49000',
+            description='Manual ExposureTime in microseconds, used unless '
+                        'auto_exposure:=true. 24000 measured 2026-08-10 on '
+                        'this robot, stationary and centred on the track with '
+                        'the lab lights ON: line value p10 201 / p50 207, '
+                        'ground p99 114 / max 126, no clipped pixels, line '
+                        'saturation p90 0.048 (well inside max_saturation '
+                        '0.20). That leaves min_brightness: 170 sitting '
+                        'roughly midway in the gap, ~31 counts clear of both '
+                        'sides. NOT a whole-track calibration -- it is one '
+                        'pose under one lighting condition. Re-measure if the '
+                        'lighting, the track surface, or the camera changes: '
+                        'point the robot at the darkest and the brightest '
+                        'stretch of the lap and check the line still reads '
+                        'above ~190 and the carpet below ~140 at both. '
+                        'Exposure and gain trade off linearly and exactly '
+                        '(4000us x2.0 measured identical to 8000us x1.0), so '
+                        'shorten this and raise analogue_gain if motion blur '
+                        'ever matters -- at 24 ms and 0.06 m/s the smear is '
+                        '~1.4 mm, negligible against a 130-161 px line, but '
+                        'that scales with speed. Keep it under the frame '
+                        'period (33333 us at 30 fps) or the frame rate drops.',
+        ),
+        DeclareLaunchArgument(
+            'analogue_gain', default_value='10.0',
+            description='Manual AnalogueGain, used unless auto_exposure:=true. '
+                        'See exposure_time above -- 2.0 is the gain half of '
+                        'that same 2026-08-10 measurement. AWB is deliberately '
+                        'left ON: it is not part of the problem (auto-exposure '
+                        'is), and switching it off without also supplying '
+                        'calibrated ColourGains puts a heavy colour cast on '
+                        'the frame that pushes the white line to saturation '
+                        'p90 ~0.45, past the max_saturation 0.20 gate, so the '
+                        'line stops being detected at all. Measured: AWB on '
+                        'with exposure locked gives line saturation p90 '
+                        '0.048-0.090.',
+        ),
+        DeclareLaunchArgument(
+            'frame_duration', default_value='50000',
+            description='libcamera FrameDurationLimits, in microseconds, set '
+                        'as both the min and max so the frame rate is pinned '
+                        'exactly. Empty (default) = leave it alone, i.e. 30 fps '
+                        'and a 33333 us ceiling on exposure_time. Set 50000 '
+                        '(20 fps) in a dim room so exposure_time can go past '
+                        'that ceiling instead of pushing AnalogueGain -- see '
+                        'the comment at the assignment. Do not go below 20 fps: '
+                        "line_follower_node's control timer runs at 20 Hz and "
+                        'would start re-using frames.',
         ),
         DeclareLaunchArgument(
             'scaler_crop', default_value='',
