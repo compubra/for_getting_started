@@ -123,4 +123,24 @@ end
 
 prof.HoughMaxPeaks  = 4;    % 霍夫峰值数，三平台一致
 prof.MaxDriftPerRow = 3;    % 霍夫斜率钳位，比值量纲、不随分辨率缩放
+
+% ── 自适应搜索半径（2026-08-09）────────────────────────────────────────
+% WindowHalfWidth 自 2026-08-05 改算法后已经不是"质心计算窗"，只是"别跳到
+% 远处无关亮区"的搜索半径闸门；但它仍是**手调的**每平台常数（mujoco 30 /
+% real 180，差 6 倍，差异完全来自线在像素上有多宽）。既然新算法每行都会
+% **实测**白线游程宽度，这个常数就没必要再手调——直接从实测宽度推出来：
+%
+%   searchRadius = clamp(AdaptiveWindowGain * 实测线宽 + 每窗最大列漂移,
+%                        AdaptiveRadiusMin, AdaptiveRadiusMax)
+%
+% 每窗漂移余量取 MaxDriftPerRow * 窗高，即霍夫斜率钳位允许的单窗最大列移动，
+% 保证半径永远覆盖"线宽 + 这一窗可能的横移"。上界按图像宽度取比例而非绝对
+% 像素，换分辨率不用重调。
+%
+% AdaptiveWindowGain = 0 即关闭，退回固定 WindowHalfWidth（旧行为）。
+% WindowHalfWidth 在启用后仍有用：它是**每帧第一个窗**（最近端，此时还没有
+% 本帧的宽度实测值）的初始半径。
+prof.AdaptiveWindowGain = 1.5;
+prof.AdaptiveRadiusMin  = 8;                        % px 下限，防止细线把闸门收死
+prof.AdaptiveRadiusMax  = 0.30 * prof.ImageWidth;   % px 上限（640 → 192）
 end

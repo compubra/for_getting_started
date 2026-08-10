@@ -13,8 +13,11 @@ addpath(genpath(runtimeRoot));
 % 方案 A（originbot_local_path_generator）已归档，见 archive/archive_vision_scheme_a
 clear originbot_sliding_window_path_generator;
 clear originbot_line_follower_debug_frame;
+clear lf_line_search;
+clear lf_safety_filter;
 configurePortablePaths(bdroot);
 exportLocalPathParameters(bdroot);
+exportSafetyParameters(bdroot);
 
 function configurePortablePaths(model)
 arguments
@@ -79,6 +82,25 @@ set_param(plant, ...
 fprintf("Active TurtleBot3 map: %s (%s)\n", mapDisplayName, mapKey);
 end
 
+function exportSafetyParameters(model)
+% 把安全层/找线状态机的参数结构体导出到 Base 工作区，供 Line_Search /
+% Safety_Filter 两个子系统里的 Interpreted MATLAB Function 块按名字引用（该块表达式在 Base 工作区求值，
+% 与视觉块引用 LocalPath_* 是同一机制）。
+%
+% 本 InitFcn 由**两个**模型共用（visual_line_follower_with_debug 与
+% visual_line_follower_sac_residual），而这两个子系统只存在于装了安全层
+% 的那些模型里。故先探测块是否存在再导出：没有该块的模型不会平白多出一堆
+% Safety_* 模型工作区变量，也不会因缺少某个必需变量而在 InitFcn 阶段就报错。
+if isempty(find_system(model, "SearchDepth", 1, "BlockType", "SubSystem", ...
+        "Name", "Safety_Filter"))
+    return;
+end
+% "scaled"：本 InitFcn 服务的两个 MuJoCo 模型里，VOmega 的 v 分量是
+% BaseLinearSpeed 刻度而非 m/s。真机模型走 mps，见
+% configure_visual_line_follower_sac_residual_real_debug.m。
+assignin("base", "LF_Safety", lf_safety_defaults(model, "scaled"));
+end
+
 function exportLocalPathParameters(model)
 % 将模型工作区的路径规划参数同步到 Base 工作区，
 % 供 Simulink 信号观测器和调试脚本直接访问
@@ -95,14 +117,27 @@ names = [
     "OriginBot_MinPixels"
     "OriginBot_ErrorScale"
     ];
-% 2026-07-22：MuJoCo 相机从 15° 下俯拍平为水平安装（与 Gazebo 对齐，见
-% archive/archive_vision_scheme_a），近端可视地面距离下限升到约 0.31m
-% （由相机安装高度/FOV 决定，水平相机 physically 看不到更近的地面）。
-% ROIFraction 0.50→0.30、Lookahead 0.20→0.40：与
-% runtime/originbot_camera_profile.m 的 MuJoCo DefaultROI/DefaultLookahead
-% 保持一致，是几何推算的合理起点，尚未跑过真值调参 sweep（旧的 0.20 前视
-% 拍平后已物理不可达，会被 clamp 强制抬高且不易察觉，故不能沿用）。
-defaults = [0.30, 30, 0.40, 0.6, 0.35, 0.04, 70, 0.30, 30, 500];
+% 2026-08-09：Lookahead 0.40→0.20；ROIFraction **保持 0.30**（不要改成
+% profile 里的 DefaultROI=0.50，理由见下）。
+%
+% 改前视：ROI=0.30 时地面可视带是 0.163~0.283m，而 Lookahead=0.40 **超出该
+% 带**，前视点一直靠多项式外推得到；0.20 落在观测范围内。
+%
+% 不改 ROI：profile 的 DefaultROI=0.50 只是缺参兜底，不是这些地图的调参值。
+% 2026-08-09 实测把 ROI 静态调到 0.50（150s，simple 图）：视觉 found 率确实
+% 从 96.5% 升到 99.6%、最长丢线 5.15s 降到 0.30s，**但真值横向 RMS 从
+% 4.8cm 恶化到 12.5cm，并出现一段持续 10.6 秒、最大 51cm 的跑偏**，屏障
+% h 最小 -0.36（真的越界了）。原因就是 Python 侧 roi_widen_step 文档早已写
+% 明的那条：更深的 ROI 会在急弯处捡到赛道**另一条邻近分支**，污染多项式拟合
+% ——simple 是 S 形图，正好会自我折返。
+%
+% 正确做法是"窄 ROI 打底 + 自适应加宽兜底"，这也正是 roi_widen_step 存在的
+% 意义（2026-08-09 已移植，见 originbot_sliding_window_path_generator.m）：
+% 平时用窄而精确的 ROI，只在窄 ROI 什么都没找到时才加宽重试一次。
+%
+% 定稿配置(0.30/0.20 + 全部移植)实测：横向 RMS 5.16cm、路径 15.10m(四种配置
+% 里最长)、角加速度 RMS 从 12.59 降到 5.62 rad/s²、越界占比 0%。
+defaults = [0.30, 30, 0.20, 0.6, 0.35, 0.04, 70, 0.30, 30, 500];
 
 for k = 1:numel(names)
     value = defaults(k);

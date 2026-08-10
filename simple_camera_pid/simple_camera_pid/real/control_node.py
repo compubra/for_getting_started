@@ -43,8 +43,13 @@ from geometry_msgs.msg import Twist, TwistStamped, Vector3
 from rclpy.node import Node
 from std_msgs.msg import Float32MultiArray
 
-from simple_camera_pid.common.config import ControllerConfig, CurveSpeedGovernorConfig, RobotConfig
+from simple_camera_pid.common.config import (
+    ControllerConfig, CurveSpeedGovernorConfig, LineSearchConfig, RobotConfig,
+    SafetyFilterConfig, VisionConfig,
+)
 from simple_camera_pid.common.control.line_follower_controller import LineFollowerController
+from simple_camera_pid.common.control.line_search import LineSearch
+from simple_camera_pid.common.control.safety_filter import SafetyFilter
 from simple_camera_pid.common.residual_policy import (
     load_residual_model, residual_observation, residual_spaces,
 )
@@ -70,9 +75,38 @@ class LineFollowerControlNode(Node):
             base_linear_speed=self.get_parameter("base_linear_speed").value,
             base_speed_scale=self.get_parameter("base_speed_scale").value,
             max_angular_speed=self.get_parameter("max_angular_speed").value,
+            # One period drives the PID discretization, this node's timer, and
+            # the safety layer's rate limits. Keeping them from a single
+            # parameter means they cannot silently disagree.
+            ts_control=float(self.get_parameter("control_period").value),
         )
         self.controller = LineFollowerController(self.robot, controller_cfg, CurveSpeedGovernorConfig())
         self.controller.reset()
+
+        # Safety layer + lost-line recovery, between the controller and the
+        # wheels. ``speed_scale`` must match the units command() returns v in,
+        # i.e. base_speed_scale -- see SafetyFilterConfig's docstring, getting
+        # it wrong is silent.
+        ts_control = float(self.get_parameter("control_period").value)
+        self.safety_filter = SafetyFilter(SafetyFilterConfig(
+            enable=bool(self.get_parameter("safety_enable_filter").value),
+            ts=ts_control,
+            speed_scale=controller_cfg.base_speed_scale,
+            lookahead=float(self.get_parameter("lookahead_distance").value),
+            lateral_max=float(self.get_parameter("safety_lateral_max").value),
+            cbf_alpha=float(self.get_parameter("safety_cbf_alpha").value),
+            speed_backoff=float(self.get_parameter("safety_speed_backoff").value),
+            max_v=controller_cfg.base_linear_speed,
+            max_omega=controller_cfg.max_angular_speed,
+            max_accel_v=float(self.get_parameter("safety_max_accel_v").value),
+            max_accel_omega=float(self.get_parameter("safety_max_accel_omega").value),
+        ))
+        self.line_search = LineSearch(LineSearchConfig(
+            enable=bool(self.get_parameter("safety_enable_search").value),
+            ts=ts_control,
+            max_v=controller_cfg.base_linear_speed,
+            max_omega=controller_cfg.max_angular_speed,
+        ))
 
         self._residual_model = None
         self._residual_max_delta_omega = float(self.get_parameter("residual_max_delta_omega").value)
@@ -114,8 +148,7 @@ class LineFollowerControlNode(Node):
             Float32MultiArray, self.get_parameter("local_path_topic").value, self._local_path_callback, 10
         )
 
-        ts_control = controller_cfg.ts_control
-        self.timer = self.create_timer(ts_control, self._on_timer)
+        self.timer = self.create_timer(controller_cfg.ts_control, self._on_timer)
         self.get_logger().info(
             f"Control node started: residual={'on' if self._residual_model else 'off'}, "
             f"control rate={1.0 / ts_control:.1f} Hz, "
@@ -161,6 +194,27 @@ class LineFollowerControlNode(Node):
         self.declare_parameter("residual_max_delta_v", 1.0)  # only used if residual_use_2d_action
         self.declare_parameter("residual_use_wheel_speed_obs", False)
         self.declare_parameter("residual_use_2d_action", False)
+
+        # --- Safety layer + lost-line recovery (ported from MATLAB 2026-08-09).
+        # control_period must match this node's timer; the safety layer's rate
+        # limits and the line memory's dead reckoning both assume a fixed dt.
+        # On real hardware the loop is NOT exactly periodic (camera frame rate,
+        # network, processing jitter), so this is an approximation -- measure
+        # the actual period before trusting the rate limits quantitatively.
+        self.declare_parameter("control_period", ControllerConfig.ts_control)
+        # lookahead_distance must equal the vision node's, since the CBF's
+        # barrier is built on the lookahead point that vision reports.
+        self.declare_parameter("lookahead_distance", VisionConfig.lookahead_distance)
+        self.declare_parameter("safety_enable_filter", SafetyFilterConfig.enable)
+        # Default False: 2026-08-09 MuJoCo ablation found neither in-place
+        # scanning nor memory-guided recovery beat leaving the existing
+        # forward-crawl behavior alone. See LineSearchConfig's docstring.
+        self.declare_parameter("safety_enable_search", LineSearchConfig.enable)
+        self.declare_parameter("safety_lateral_max", SafetyFilterConfig.lateral_max)
+        self.declare_parameter("safety_cbf_alpha", SafetyFilterConfig.cbf_alpha)
+        self.declare_parameter("safety_speed_backoff", SafetyFilterConfig.speed_backoff)
+        self.declare_parameter("safety_max_accel_v", SafetyFilterConfig.max_accel_v)
+        self.declare_parameter("safety_max_accel_omega", SafetyFilterConfig.max_accel_omega)
 
     def _local_path_callback(self, msg: Float32MultiArray) -> None:
         try:
@@ -212,11 +266,39 @@ class LineFollowerControlNode(Node):
             steering_error, lateral_error, heading_error, found
         )
 
-        wheel_cmd = self.controller.step(
+        # PID (+residual) -> lost-line recovery -> safety layer -> wheels, the
+        # same order as the MATLAB models' Sum -> Line_Search -> Safety_Filter
+        # -> Diff_Drive_Kinematics chain.
+        v_cmd, omega_cmd = self.controller.command(
             steering_error=steering_error, found=found,
             heading_error=heading_error, lateral_error=lateral_error,
             residual_delta_omega=residual_delta_omega, residual_delta_v=residual_delta_v,
         )
+
+        # Body velocity reconstructed from the wheel speeds this node last
+        # issued. This is NOT odometry -- control_node has no /odom
+        # subscription -- so it cannot see wheel slip or actuator lag. It feeds
+        # only the line memory's dead reckoning, which is bounded by
+        # mem_max_age and, with path points unavailable here, inert anyway.
+        # Subscribe to /odom before relying on it for anything.
+        left_prev, right_prev = self._prev_wheel_command
+        v_meas = self.robot.wheel_radius * (left_prev + right_prev) / 2.0
+        omega_meas = (self.robot.wheel_radius * (right_prev - left_prev)
+                      / self.robot.wheel_separation)
+
+        # path_points=None: this node's wire format (real/local_path_msg.py)
+        # carries five scalars and no path geometry, so the geometric memory
+        # never becomes valid here and recovery degrades to BRAKE -> SCAN ->
+        # GIVEUP. Intended, not a defect -- extending the message is a separate
+        # decision. The single-process node has the points locally.
+        search = self.line_search.step(
+            v_cmd, omega_cmd, lateral_error, found, v_meas, omega_meas,
+            path_points=None, path_point_count=0,
+        )
+        safety = self.safety_filter.step(
+            search.v, search.omega, lateral_error, heading_error, found,
+        )
+        wheel_cmd = self.controller.to_wheels(safety.v, safety.omega)
         self._prev_wheel_command = (wheel_cmd.left, wheel_cmd.right)
 
         linear = self.robot.wheel_radius * (wheel_cmd.left + wheel_cmd.right) / 2.0

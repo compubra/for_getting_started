@@ -126,6 +126,101 @@ class VisionConfig:
 
 
 @dataclass
+class SafetyFilterConfig:
+    """Inference-time safety layer: discrete CBF + box + rate constraints.
+
+    Ported from ``matlab/runtime/control/lf_safety_filter.m`` (2026-08-09);
+    defaults mirror ``lf_safety_defaults.m``. See that MATLAB file's header for
+    the full CBF derivation -- the short version is that the barrier is built
+    on the *lookahead* lateral offset (which the vision module already
+    reports as ``lateral_error``) rather than the robot's own lateral offset,
+    because the lookahead point has relative degree 1 with respect to omega,
+    so the CBF condition collapses to a single affine inequality in omega and
+    its projection is one clamp rather than a QP.
+
+    Method reference: Gu et al., "A Review of Safe Reinforcement Learning:
+    Methods, Theories, and Applications", IEEE TPAMI 46(12):11216-11235, 2024
+    -- section III-B-2 (safety layer / OptLayer) and III-A-2 (CBFs).
+
+    ``speed_scale`` converts the ``v`` this filter is handed into m/s. The two
+    deployment families disagree on that unit and the numbers alone cannot
+    tell them apart, so it is explicit here rather than inferred:
+
+      * real robot / this Python port -- ``LineFollowerController.command()``
+        returns v already in the ``base_linear_speed`` scale, so
+        ``speed_scale`` is ``base_speed_scale`` (0.03 by default).
+      * MATLAB ``_real.slx`` -- PID_Controller emits ``linear_x`` in m/s
+        directly, so its ``signalUnits`` is ``"mps"`` and the scale is 1.0.
+
+    Getting it wrong is silent: the ``v*sin(psi)`` term of the barrier is off
+    by 1/base_speed_scale (~33x) and the barrier just becomes too loose or too
+    tight without raising anything.
+    """
+
+    enable: bool = True                  # False -> compute diagnostics, do not project
+    ts: float = 0.05                     # control period (s), Ts_Control
+    speed_scale: float = 0.03            # v units -> m/s (see docstring)
+    lookahead: float = 0.20              # LocalPath_LookaheadDistance (m)
+    # Denominator vision.py normalizes lateral_error by. **vision.py's
+    # LATERAL_NORM is the source of truth**; both must agree or the barrier's
+    # physical units are wrong.
+    lateral_norm: float = 0.55
+    lateral_max: float = 0.8             # safe set is |lateral_error| <= this
+    cbf_alpha: float = 2.0               # class-K gain (1/s); larger = more aggressive
+    cbf_singular_tol: float = 1e-3       # |A| below this -> no CBF bound this tick
+    speed_backoff: float = 0.3           # 0..1 slowdown near the barrier (HEURISTIC,
+    # explicitly NOT part of the CBF's forward-invariance guarantee)
+    max_v: float = 20.0                  # box limit, same units as v in
+    max_omega: float = 1.5               # box limit (rad/s)
+    max_accel_v: float = 40.0            # rate limit (v units/s)
+    max_accel_omega: float = 10.0        # rate limit (rad/s^2)
+
+
+@dataclass
+class LineSearchConfig:
+    """Lost-line recovery state machine + odometry-dead-reckoned line memory.
+
+    Ported from ``matlab/runtime/control/lf_line_search.m`` (2026-08-09).
+
+    ``enable`` defaults to **False**. 2026-08-09 closed-loop MuJoCo ablation
+    (see ``matlab/runtime/control/README.md``): neither in-place scanning nor
+    memory-guided directed recovery beat doing nothing -- the untouched
+    baseline (this project's existing ``min_search_speed_bias`` forward crawl)
+    reacquired the line and completed a lap, while both recovery strategies
+    stopped and never recovered. The bottleneck was measured to be *detection*,
+    not the recovery strategy: during a 20 s loss the robot stayed 3.7-4.5 cm
+    from the track centreline the whole time and the line was geometrically
+    inside the camera's ROI footprint 32.2% of that time, undetected. Turning
+    this on before the observation side is fixed only makes things worse.
+    """
+
+    enable: bool = False
+    ts: float = 0.05
+    max_v: float = 20.0                  # used to scale recover_speed_frac
+    max_omega: float = 1.5
+    hold_time: float = 0.4               # don't interfere for this long after a loss --
+    # vision.py is still freezing/extrapolating steering_error over this window
+    brake_time: float = 0.3
+    scan_rate: float = 0.9               # in-place scan yaw rate (rad/s)
+    scan_tolerance: float = 0.05         # swept-angle arrival test (rad)
+    scan_timeout: float = 15.0
+    dir_deadband: float = 0.02
+    # Geometric memory. mem_max_age=8 s: the baseline took ~5.2 s of forward
+    # crawl to reacquire, and memory age counts from the last *reliable* frame
+    # (~0.5 s before the loss), so the budget has to exceed that with margin.
+    mem_max_age: float = 8.0
+    mem_min_points: int = 3
+    mem_lookahead: float = 0.25          # keep inside the ROI's visible ground band
+    recover_gain: float = 1.5            # bearing -> omega (1/s)
+    recover_align_cone: float = 0.7853981633974483   # 45 deg
+    recover_speed_frac: float = 0.25
+    recover_timeout: float = 8.0
+    scan_amplitudes: tuple = (0.4363323129985824, 0.8726646259971648, 1.3962634015954636)
+    # ~25/50/80 deg. Camera horizontal FOV is ~62 deg, so +/-25 deg already
+    # sweeps ~112 deg of ground heading.
+
+
+@dataclass
 class ResidualRewardConfig:
     """Reward/done weights shared by the SAC and PPO residual controllers.
 
