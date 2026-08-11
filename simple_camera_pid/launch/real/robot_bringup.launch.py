@@ -17,6 +17,15 @@ script:
     crashes the whole component container. This launch file loads only
     ``camera::CameraNode`` into a bare container.
 
+``line_follower_vision_node`` (``vision_node:=true``, default false) is the
+other opt-in node this file can start -- the split-deployment vision half,
+publishing ``/line_follower/local_path`` for a PC-side
+``line_follower_control_node`` to consume (see that node's own module
+docstring for the split architecture's rationale). It reads
+``vision_node_config_file`` (same default yaml as ``vision_debug_config_file``
+below). Turn ``vision_debug`` off when turning this on -- see ``vision_node``'s
+own argument description for why.
+
 ``vision_debug_node`` runs by default (``vision_debug:=true``) -- per its own
 module docstring and real_monitor.launch.py's, it has to run ON THE PI (next
 to the camera) rather than on the PC, since subscribing to the raw camera
@@ -36,6 +45,13 @@ Usage
     ros2 launch simple_camera_pid robot_bringup.launch.py jpeg_quality:=50
     ros2 launch simple_camera_pid robot_bringup.launch.py usb_port:=/dev/ttyACM1
     ros2 launch simple_camera_pid robot_bringup.launch.py vision_debug:=false
+    ros2 launch simple_camera_pid robot_bringup.launch.py \\
+        vision_debug:=false vision_node:=true
+        (split-deployment control tuning: this robot only runs the camera,
+        base driver, and line_follower_vision_node -- vision_debug_node stays
+        off so it isn't competing for CPU. Pair with a PC-side
+        line_follower_control_node, e.g. via ~/.bashrc's pi_vision, which now
+        just wraps this same argument.)
     ros2 launch simple_camera_pid robot_bringup.launch.py orientation:=0
         (only if the camera is ever remounted right-side-up -- see
         orientation's own entry below; default is already 180 for this
@@ -70,6 +86,13 @@ Arguments
                             Vision/camera tuning YAML for vision_debug_node
                           (default config/real/real_line_follower.yaml, same
                           file the real controller nodes read).
+    vision_node              Launch line_follower_vision_node, the split-
+                          deployment vision half (default false -- see its
+                          own entry below).
+    vision_node_config_file
+                            Vision/camera tuning YAML for
+                          line_follower_vision_node (default same
+                          real_line_follower.yaml).
     auto_exposure           Leave libcamera AE/AGC on (default false). The
                           default LOCKS exposure -- this is what replaces
                           "turn the lab lights off" as the way to stop the
@@ -260,6 +283,7 @@ def generate_launch_description():
     tb3_param_dir = LaunchConfiguration('tb3_param_dir')
     vision_debug = LaunchConfiguration('vision_debug')
     vision_debug_config_file = LaunchConfiguration('vision_debug_config_file')
+    vision_node_config_file = LaunchConfiguration('vision_node_config_file')
 
     turtlebot3_bringup_share = get_package_share_directory('turtlebot3_bringup')
     this_pkg = get_package_share_directory('simple_camera_pid')
@@ -290,6 +314,23 @@ def generate_launch_description():
             {'platform': 'real'},
         ],
         condition=IfCondition(vision_debug),
+    )
+
+    # Split-deployment vision half (see vision_node.py's module docstring and
+    # ~/.bashrc's pi_vision -- this is what that function used to start
+    # separately). Off by default: it only makes sense when a PC-side
+    # line_follower_control_node is also running, and running it alongside
+    # vision_debug_node would subscribe to the raw camera feed twice on the
+    # already CPU-constrained Pi for no benefit. camera_profile defaults to
+    # "real" inside the node itself, so no override dict is needed here the
+    # way vision_debug_node needs {'platform': 'real'}.
+    vision_node = Node(
+        package='simple_camera_pid',
+        executable='line_follower_vision_node',
+        name='line_follower_vision_node',
+        output='screen',
+        parameters=[vision_node_config_file],
+        condition=IfCondition(LaunchConfiguration('vision_node')),
     )
 
     return LaunchDescription([
@@ -328,6 +369,31 @@ def generate_launch_description():
             description='Vision/camera tuning YAML for vision_debug_node -- '
                         'same file the real controller nodes read, so its '
                         'view can never drift from what the robot runs.',
+        ),
+        DeclareLaunchArgument(
+            'vision_node', default_value='false',
+            description='Launch line_follower_vision_node -- the split-'
+                        'deployment vision half, publishing '
+                        '/line_follower/local_path for a PC-side '
+                        'line_follower_control_node to consume. Default '
+                        'false: only turn this on when actually running the '
+                        'split control-tuning setup, and pair it with '
+                        'vision_debug:=false (both subscribe to the raw '
+                        'camera feed; running both at once competes for the '
+                        "Pi's CPU for no reason -- see vision_debug_node's "
+                        'own module docstring for the same argument applied '
+                        'there).',
+        ),
+        DeclareLaunchArgument(
+            'vision_node_config_file',
+            default_value=os.path.join(
+                this_pkg, 'config', 'real', 'real_line_follower.yaml'),
+            description='Vision/camera tuning YAML for line_follower_vision_node '
+                        '-- same file vision_debug_config_file points at by '
+                        'default (and the same the PC-side control_node '
+                        'reads its own copy of), kept as a separate argument '
+                        'in case you ever want the debug overlay and the '
+                        'real detector to run against two different files.',
         ),
         DeclareLaunchArgument(
             'orientation', default_value='180',
@@ -420,4 +486,5 @@ def generate_launch_description():
         OpaqueFunction(function=_make_camera_container),
         base_driver,
         vision_debug_node,
+        vision_node,
     ])
