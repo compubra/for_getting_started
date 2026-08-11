@@ -36,3 +36,51 @@ This module (`vision.py`, `LineFollowerVision`) mirrors that: both
 `line_follower_node.py`/`vision_debug_node.py` construct the same
 class, just with different `camera_geometry` presets and `flip_vertical`
 settings, and there is no separate Gazebo-only vision module anymore.
+
+## `vision.py` `seed_mode` (2026-08-11)
+
+`_hough_seed` is **83% of a `LineFollowerVision.step()` call** on the real
+robot's frames, at every ROI depth, and on this track it is also the largest
+single noise source in the output. `seed_mode` selects it or a Hough-free
+replacement (`_run_midpoint_seed`); the default `"hough"` leaves every
+platform exactly as it was.
+
+### What was actually verified
+
+* `seed_mode="hough"` is **bit-identical** to the pre-change `vision.py`:
+  0 found-flag mismatches and max |delta| exactly `0.000e+00` on
+  steering/lateral/heading/confidence over **2692 frames** -- 150 live
+  stationary frames (640x480, exposure-locked, current live parameters) and
+  1196 frames of the 2026-07-31 driven lap (800x600) -- at both
+  `roi_bottom_fraction` 0.3 and 0.6. This covers the `_largest_component`
+  swap, which is the only change on that path.
+* `_largest_component` (OpenCV) matches the `scipy.ndimage.label` rule it
+  replaces on **3988 randomised masks, 1000 of them built with exact size
+  ties**: 0 disagreements. A naive `argmax` over OpenCV's `CC_STAT_AREA`
+  fails 5 of those; the explicit raster-order tie-break in the function is
+  what makes them agree, and it is there for that reason.
+* `seed_mode="run_midpoint"` is a **deliberate behaviour change**, quantified
+  on the same frames: on the driven lap at roi 0.6 it matches `"hough"`
+  exactly on 93.8% of frames, max |delta| 0.074 steering / 0.154 heading,
+  0 found-flag mismatches, `found_rate` 1.000 in both modes. Cost falls from
+  49.5 to 4.7 ms/frame (roi 0.6, this PC, relative only), and the seed's own
+  frame-to-frame wander from sd 106 px to sd 1.3 px on frames whose mask
+  centre of mass is steady to sd 0.4 px.
+* Transport was measured and is not the bottleneck: 0.385 ms to serialise and
+  0.284 ms to deserialise a 640x480x3 `sensor_msgs/Image` in rclpy, 0.040 ms
+  for `vision_node`'s `_image_msg_to_rgb`.
+
+### NOT verified
+
+* **Neither mode has been driven.** All of the above is replay of stationary
+  or recorded frames. `seed_mode` is therefore not set in
+  `config/real/real_line_follower.yaml`, and the default keeps today's
+  behaviour.
+* **MuJoCo and training were not re-run.** `mujoco/` could not be exercised
+  here (the workspace's `model/` scene set is missing `simple_camera_track_*`
+  and the env's renderer returned no frame), so the claim that they are
+  unaffected rests on the default `seed_mode="hough"` plus the randomised
+  `_largest_component` equivalence above, not on a MuJoCo run.
+* MATLAB is unchanged and now differs by one more item: it has no
+  `seed_mode`, and `originbot_sliding_window_path_generator.m` still seeds
+  from `houghSeed` unconditionally.

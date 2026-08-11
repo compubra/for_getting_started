@@ -86,7 +86,7 @@ def _camera():
     )
 
 
-def _vision(roi: float, lookahead: float):
+def _vision(roi: float, lookahead: float, seed_mode: str = 'hough'):
     from simple_camera_pid.common.vision import LineFollowerVision
     return LineFollowerVision(
         roi_bottom_fraction=roi, waypoint_count=30, lookahead_distance=lookahead,
@@ -95,7 +95,7 @@ def _vision(roi: float, lookahead: float):
         error_scale=500.0, roi_widen_step=0.2, roi_widen_max=0.7,
         otsu_min_contrast=30.0, adaptive_brightness_fraction=0.0,
         image_height=IMAGE_H, image_width=IMAGE_W, camera=_camera(),
-        flip_vertical=False,
+        flip_vertical=False, seed_mode=seed_mode,
     )
 
 
@@ -226,6 +226,67 @@ def mode_sweep(args):
                   f'{np.median(np.abs(np.diff(o[:,0]))):>10.4f} {o[:,1].std():>7.3f}')
 
 
+def mode_seed(args):
+    """What the sliding window is seeded with, how much it costs, and whether
+    the first window is measuring the path or echoing the seed.
+
+    Works on a saved .npz of frames (``--frames``) as well as live, because
+    the robot is often unavailable -- see ``--frames``.
+    """
+    import time
+    from simple_camera_pid.common import vision as V
+
+    frames = (list(np.load(args.frames)['frames']) if args.frames
+              else grab(args.topic, args.count))
+    print(f'{len(frames)} frames, roi {args.roi}, lookahead {args.lookahead}\n')
+
+    orig_find = V._find_nearest_run
+    print(f'{"seed_mode":>13} {"ms/frame":>9} {"found":>6} {"head sd":>8} '
+          f'{"base_col sd":>12} {"npe sd":>8} {"gate-trunc":>11} {"corr(win,seed)":>15}')
+    for mode in ('hough', 'run_midpoint'):
+        vis = _vision(args.roi, args.lookahead, mode)
+        path_top = int(np.clip(np.floor((1 - args.roi) * IMAGE_H), 0, IMAGE_H - 1))
+        rec, rows, times = [], [], []
+
+        def _recording_find(col_mass, current_col, search_radius, min_pixels):
+            out = orig_find(col_mass, current_col, search_radius, min_pixels)
+            lo = max(0, int(np.floor(current_col - search_radius)))
+            hi = min(col_mass.size - 1, int(np.ceil(current_col + search_radius)))
+            rec.append((current_col, lo, hi, out))
+            return out
+
+        V._find_nearest_run = _recording_find
+        try:
+            for f in frames:
+                rec.clear()
+                t0 = time.perf_counter()
+                r = vis.step(np.asarray(f))
+                times.append((time.perf_counter() - t0) * 1e3)
+                first = next((c for c in rec if c[3] is not None), None)
+                if not r.found or first is None:
+                    continue
+                cur, lo, hi, (left, right, _) = first
+                att = vis._detect_attempt(np.asarray(f), args.roi, 30,
+                                          0.5 * (IMAGE_W + 1))
+                rows.append([att.near_pixel_error, att.base_col, cur,
+                             0.5 * (left + right),
+                             float(left <= lo or right >= hi),
+                             r.heading_error, 1.0])
+        finally:
+            V._find_nearest_run = orig_find
+
+        R = np.asarray(rows)
+        corr = np.corrcoef(R[:, 3], R[:, 2])[0, 1] if len(R) > 2 else float('nan')
+        print(f'{mode:>13} {np.mean(times):>9.2f} {len(R)/len(frames):>6.3f} '
+              f'{R[:,5].std():>8.4f} {R[:,1].std():>12.1f} {R[:,0].std():>8.1f} '
+              f'{100*R[:,4].mean():>10.1f}% {corr:>15.3f}')
+
+    print('\n  base_col sd is measured on frames that are nearly the same picture, so\n'
+          '  it is pure seed noise. corr(win,seed) near 1 means the first window is\n'
+          '  reproducing the seed rather than measuring the path -- which happens when\n'
+          '  the +/-search_radius gate truncates a path wider than the gate.')
+
+
 def mode_horizon(args):
     """No robot needed. Where the ground is, per image row."""
     from simple_camera_pid.common.camera_geometry import pixel_to_ground
@@ -261,14 +322,18 @@ def main(argv=None):
     ap = argparse.ArgumentParser(
         description=__doc__.split('\n\n')[0],
         formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument('mode', choices=('exposure', 'fit', 'sweep', 'horizon'))
+    ap.add_argument('mode', choices=('exposure', 'fit', 'sweep', 'seed', 'horizon'))
     ap.add_argument('--count', type=int, default=60, help='frames to collect (default 60)')
     ap.add_argument('--topic', default=DEFAULT_TOPIC)
     ap.add_argument('--roi', type=float, default=0.3)
     ap.add_argument('--lookahead', type=float, default=0.20)
+    ap.add_argument('--frames', default=None,
+                    help='replay a saved .npz of frames instead of grabbing live '
+                         '("seed" mode only). ~/桌面/tuning_20260810/'
+                         'vision_profiling_20260811/ holds the 2026-08-11 burst.')
     args = ap.parse_args(argv)
-    {'exposure': mode_exposure, 'fit': mode_fit,
-     'sweep': mode_sweep, 'horizon': mode_horizon}[args.mode](args)
+    {'exposure': mode_exposure, 'fit': mode_fit, 'sweep': mode_sweep,
+     'seed': mode_seed, 'horizon': mode_horizon}[args.mode](args)
     return 0
 
 
