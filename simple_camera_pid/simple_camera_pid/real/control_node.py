@@ -195,13 +195,24 @@ class LineFollowerControlNode(Node):
         # nothing written in the yaml reached it. Measured on this robot at
         # kp 0.7 / kd 0 over two 60 s runs: speed is a -1.000-correlated
         # function of |heading_error| (heading_weight 1.0 always beats
-        # lateral_weight 0.8 * a well-tracked lateral error), whose median on
-        # this track is 0.66-0.73 rad -- a real reading, the track's own
-        # curves are about 0.31 m in radius -- so slowdown_gain -0.9 held the
-        # robot at 34-41% speed as a matter of course and at the
-        # min_speed_scale 0.1 floor for 8-10% of each run. That is the visible
-        # "crawls through curves, and stops and starts" behaviour: 19-23
-        # excursions below 10 mm/s per minute.
+        # lateral_weight 0.8 * a well-tracked lateral error), and
+        # slowdown_gain -0.9 held the robot at 34-41% speed as a matter of
+        # course and at the min_speed_scale 0.1 floor for 8-10% of each run.
+        # That is the visible "crawls through curves, and stops and starts"
+        # behaviour: 19-23 excursions below 10 mm/s per minute.
+        #
+        # 2026-08-11: do NOT retune these against the present signal. An
+        # earlier version of this comment read heading_error's 0.66-0.73 rad
+        # median as a real curvature measurement implying a ~0.31 m track
+        # radius; that was wrong (retracted in 45a4467, see
+        # roi_bottom_fraction's comment in real_line_follower.yaml). With the
+        # robot stationary, heading_error covers its whole -1.0..+1.0 range on
+        # frames whose brightness varies by 2 counts, because it is the slope
+        # of a quadratic fitted over the ~0.08 m of ground depth
+        # roi_bottom_fraction 0.3 leaves visible. So this governor is
+        # amplifying a noisy input, not merely mistuned for the track. Fix the
+        # ROI depth first; choosing a slowdown_gain against the current signal
+        # is fitting to noise.
         self.declare_parameter("curve_heading_weight", CurveSpeedGovernorConfig.heading_weight)
         self.declare_parameter("curve_lateral_weight", CurveSpeedGovernorConfig.lateral_weight)
         self.declare_parameter("curve_slowdown_gain", CurveSpeedGovernorConfig.slowdown_gain)
