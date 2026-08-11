@@ -141,6 +141,47 @@
     # max_saturation=0.30 AND auto-exposure AND a control loop that was
     # actually ticking at 1.8-21 Hz rather than 20 (see kp's own comment).
     # Re-run the kp sweep before trusting any of those numbers.
+    #
+    # 2026-08-11: roi_bottom_fraction 0.3 is TOO SHALLOW ON THIS CAMERA and it
+    # is what makes heading_error meaningless. At 15 deg pitch and 0.133 m
+    # mount height, the bottom 30% of the frame covers only about 0.08 m of
+    # ground DEPTH, and heading_error is the derivative of a quadratic fitted
+    # across that depth, evaluated at lookahead_distance 0.20 -- which lands
+    # on the near EDGE of the fitted range, where a short-baseline quadratic's
+    # slope is least determined.
+    #
+    # Measured with the robot stationary on a straight, 100 live frames whose
+    # ROI p90 brightness varies by 2 counts (i.e. the exposure lock from
+    # 80f951c is working and the input is essentially one repeated image):
+    # the fitted quadratic's a coefficient has mean 4.6 and sd 17.8, ranging
+    # -33.6 to +75.2, so atan(2a*x + b) saturates and heading_error covers its
+    # whole -1.000..+1.000 range on identical pictures. lateral_error, which
+    # is a position rather than a derivative, stays 6x steadier on the same
+    # frames.
+    #
+    # Replaying one 60-frame burst through every candidate (found_rate 1.000
+    # throughout):
+    #
+    #   roi  lookahead  x-span   |a| med  heading sd  frame-to-frame
+    #   0.3  0.20       0.071 m  13.84    0.678       0.363
+    #   0.4  0.20       0.166 m   4.35    0.504       0.244
+    #   0.5  0.30       0.317 m   0.97    0.145       0.112
+    #   0.6  0.30       0.448 m   0.29    0.085       0.084
+    #   0.7  0.30       1.111 m   0.03    0.046       0.026
+    #
+    # 0.6 / 0.30 is the recommendation: 8x steadier heading than today with a
+    # 0.45 m baseline that is still real ground. 0.7 is NOT recommended
+    # despite scoring best -- its x-span jumps 2.5x for a 0.1 ROI increase,
+    # the signature of the ROI reaching toward the horizon, where a
+    # one-pixel error projects to tens of centimetres and the extra
+    # smoothness is not information.
+    #
+    # NOT YET RUN ON A MOVING ROBOT. This is a stationary-frame analysis: it
+    # shows the heading signal gets better, not that the closed loop does, and
+    # a deeper ROI sees more of the room, which is where the 2026-08-04 false
+    # positives came from (the Otsu gate above should now reject them, but
+    # that pairing has not been driven). Change roi and lookahead together --
+    # a 0.30 lookahead inside a 0.3 ROI would be pure extrapolation.
     roi_bottom_fraction: 0.3
     num_points: 30
     lookahead_distance: 0.20
@@ -336,15 +377,28 @@
     # lateral_weight 0.8 * a well-tracked lateral error (0.09), so speed is
     # a pure function of heading_error alone.
     #
-    # heading_error itself is not the bug -- its median of 0.66-0.74 rad is a
-    # real reading of a genuinely tight track (a 0.2 m lookahead subtending
-    # 0.7 rad implies a curve radius near 0.31 m, which matches this track),
-    # and it is smooth frame to frame (median step 0.010 rad). The mismatch
-    # is that slowdown_gain -0.9 was chosen for a track whose curves do not
-    # do that: at the MEASURED median heading it holds the robot at 34-41%
-    # speed as a matter of course, and at the +/-1.0 heading_error clamp
-    # (8-10% of every run) it pins it to the min_speed_scale 0.1 floor --
-    # 6 mm/s, indistinguishable from stopped.
+    # CORRECTION 2026-08-11: an earlier version of this comment claimed
+    # heading_error's 0.66-0.74 rad median was "a real reading of a genuinely
+    # tight track", inferring a ~0.31 m curve radius from it. That was WRONG,
+    # and the governor conclusion below has to be read with that in mind: the
+    # signal driving it is mostly noise. See roi_bottom_fraction above for the
+    # measurement -- with the robot stationary and 100 frames whose ROI p90
+    # brightness varies by 2 counts, heading_error still ranged the full
+    # -1.000..+1.000 because it is the SLOPE of a quadratic fitted over the
+    # 0.08 m of ground depth roi_bottom_fraction 0.3 leaves visible. The fit's
+    # own curvature coefficient has sd 17.8 across those identical frames.
+    #
+    # So the governor is not merely mistuned for this track -- it is tracking
+    # a noise signal with heading_weight 1.0, which is why the speed swings.
+    # Fix the ROI depth first (a deeper ROI cuts heading sd about 8x); only
+    # then is there a real heading signal worth choosing a slowdown_gain
+    # against. Retuning the gain against the current signal would be fitting
+    # to noise.
+    #
+    # The consequence measurements stand regardless of what heading_error
+    # means: slowdown_gain -0.9 held the robot at 34-41% speed as a matter of
+    # course, and at the +/-1.0 clamp (8-10% of every run) pinned it to the
+    # min_speed_scale 0.1 floor -- 6 mm/s, indistinguishable from stopped.
     #
     # UNVERIFIED, DO NOT TREAT AS TUNED. The retune this analysis implies
     # (slowdown_gain -0.5, min_speed_scale 0.35 -- predicted to lift the
