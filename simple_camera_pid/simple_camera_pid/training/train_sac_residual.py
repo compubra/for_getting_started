@@ -45,7 +45,19 @@ def train_sac_residual(repo_root: Path, cfg: SACTrainingConfig | None = None) ->
         map_key=cfg.map_key, reward=cfg.reward, domain_randomization=cfg.domain_rand,
         max_steps_per_episode=cfg.max_steps_per_episode,
     )
-    env = Monitor(ResidualLineFollowerEnv(repo_root, config=env_cfg), filename=str(out_dir / "train"))
+    # controller/governor/vision go through ResidualLineFollowerEnv's
+    # **base_env_kwargs to Turtlebot3LineFollowerEnv. Without them the base
+    # env falls back to ControllerConfig()'s own defaults, which are the
+    # pre-2026-08-04 Gazebo gains -- a base controller that drives the
+    # simulated robot off the track, so the residual would be learning to
+    # correct a controller nobody deploys. See sac_training_config.py.
+    env = Monitor(
+        ResidualLineFollowerEnv(
+            repo_root, config=env_cfg,
+            controller=cfg.controller, governor=cfg.governor, vision=cfg.vision,
+        ),
+        filename=str(out_dir / "train"),
+    )
 
     agent = SAC(
         "MlpPolicy",

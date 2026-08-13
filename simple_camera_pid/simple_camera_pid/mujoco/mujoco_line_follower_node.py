@@ -35,7 +35,9 @@ from rclpy.node import Node
 from sensor_msgs.msg import Image
 from std_msgs.msg import Float32MultiArray, Header
 
-from simple_camera_pid.common.config import ControllerConfig, RobotConfig, VisionConfig
+from simple_camera_pid.common.config import (
+    ControllerConfig, CurveSpeedGovernorConfig, RobotConfig, VisionConfig,
+)
 from simple_camera_pid.common.residual_policy import (
     load_residual_model, residual_observation, residual_spaces,
 )
@@ -111,6 +113,10 @@ class MujocoLineFollowerNode(Node):
             ki=self.get_parameter("ki").value,
             kd=self.get_parameter("kd").value,
             n_filter=self.get_parameter("n_filter").value,
+            steering_sign=self.get_parameter("steering_sign").value,
+            base_linear_speed=self.get_parameter("base_linear_speed").value,
+            base_speed_scale=self.get_parameter("base_speed_scale").value,
+            max_angular_speed=self.get_parameter("max_angular_speed").value,
         )
         vision = VisionConfig(
             roi_bottom_fraction=self.get_parameter("roi_bottom_fraction").value,
@@ -121,9 +127,26 @@ class MujocoLineFollowerNode(Node):
             roi_widen_step=self.get_parameter("roi_widen_step").value,
             roi_widen_max=self.get_parameter("roi_widen_max").value,
         )
+        # Curve_Speed_Governor -- until 2026-08-13 this node built
+        # CurveSpeedGovernorConfig() from bare dataclass defaults and never
+        # passed it to Turtlebot3LineFollowerEnv at all (the env's own
+        # `governor` constructor arg went unused), the same gap
+        # base_speed_scale/max_angular_speed/steering_sign above had here
+        # until this same fix. See real/control_node.py's matching comment
+        # for the measurement that made exposing this necessary on the real
+        # robot; not yet re-measured in MuJoCo specifically.
+        governor = CurveSpeedGovernorConfig(
+            heading_weight=self.get_parameter("curve_heading_weight").value,
+            lateral_weight=self.get_parameter("curve_lateral_weight").value,
+            slowdown_gain=self.get_parameter("curve_slowdown_gain").value,
+            slowdown_bias=self.get_parameter("curve_slowdown_bias").value,
+            min_speed_scale=self.get_parameter("curve_min_speed_scale").value,
+            max_speed_scale=self.get_parameter("curve_max_speed_scale").value,
+        )
 
         self.env = Turtlebot3LineFollowerEnv(
             repo_root, map_key=map_key, robot=robot, controller=controller, vision=vision,
+            governor=governor,
         )
         self.env.reset()
 
@@ -192,6 +215,21 @@ class MujocoLineFollowerNode(Node):
         self.declare_parameter("ki", ControllerConfig.ki)
         self.declare_parameter("kd", ControllerConfig.kd)
         self.declare_parameter("n_filter", ControllerConfig.n_filter)
+        # 2026-08-13: these three, plus the curve_* governor params below,
+        # were NOT reachable from this node at all before this fix -- the
+        # controller was always built from ControllerConfig()'s bare
+        # dataclass defaults (base_speed_scale=0.03, max_angular_speed=1.5,
+        # steering_sign=-1.0) regardless of what a yaml set, the same class
+        # of gap real/control_node.py and real/line_follower_node.py had
+        # for the real robot until 2026-07-31 and 2026-08-10 respectively.
+        # Declared here at the CLASS defaults, so exposing them changes
+        # nothing by itself -- config/mujoco/mujoco_line_follower.yaml does
+        # not set them (as of this fix), and this node's behaviour is
+        # unchanged until it does.
+        self.declare_parameter("steering_sign", ControllerConfig.steering_sign)
+        self.declare_parameter("base_linear_speed", ControllerConfig.base_linear_speed)
+        self.declare_parameter("base_speed_scale", ControllerConfig.base_speed_scale)
+        self.declare_parameter("max_angular_speed", ControllerConfig.max_angular_speed)
         self.declare_parameter("roi_bottom_fraction", VisionConfig.roi_bottom_fraction)
         self.declare_parameter("lookahead_distance", VisionConfig.lookahead_distance)
         self.declare_parameter("lateral_gain", VisionConfig.lateral_gain)
@@ -199,6 +237,16 @@ class MujocoLineFollowerNode(Node):
         self.declare_parameter("curvature_gain", VisionConfig.curvature_gain)
         self.declare_parameter("roi_widen_step", VisionConfig.roi_widen_step)
         self.declare_parameter("roi_widen_max", VisionConfig.roi_widen_max)
+        # Curve_Speed_Governor -- see the comment on Turtlebot3LineFollowerEnv's
+        # construction in __init__ above. Declared at CurveSpeedGovernorConfig's
+        # own class defaults, so exposing them is a no-op until the yaml sets
+        # one.
+        self.declare_parameter("curve_heading_weight", CurveSpeedGovernorConfig.heading_weight)
+        self.declare_parameter("curve_lateral_weight", CurveSpeedGovernorConfig.lateral_weight)
+        self.declare_parameter("curve_slowdown_gain", CurveSpeedGovernorConfig.slowdown_gain)
+        self.declare_parameter("curve_slowdown_bias", CurveSpeedGovernorConfig.slowdown_bias)
+        self.declare_parameter("curve_min_speed_scale", CurveSpeedGovernorConfig.min_speed_scale)
+        self.declare_parameter("curve_max_speed_scale", CurveSpeedGovernorConfig.max_speed_scale)
         self.declare_parameter("image_topic", "/camera/image_raw")
         self.declare_parameter("odom_topic", "/odom")
         self.declare_parameter("cmd_vel_topic", "/cmd_vel")

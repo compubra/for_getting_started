@@ -18,11 +18,51 @@ mujoco_line_follower_node:
     wheel_separation: 0.160
     max_wheel_speed: 20.0
 
-    # LinePID gains (Kp_Line, Ki_Line, Kd_Line, N_Line in the model workspace).
-    kp: 5.0
-    ki: 0.0
-    kd: 0.35
+    # 2026-08-13: kp/ki/kd/base_speed_scale/max_angular_speed ported from the
+    # real robot's 2026-08-11 tuning (see config/real/real_line_follower.yaml
+    # for the full derivation) after confirming they transfer here, not just
+    # fixing a real-camera-noise artifact. Until this same date this node
+    # never read base_speed_scale/max_angular_speed/steering_sign at all --
+    # ControllerConfig(kp=.., ki=.., kd=.., n_filter=..) left them at
+    # ControllerConfig's own bare dataclass defaults (0.03/1.5/-1.0)
+    # regardless of anything set here, the identical gap
+    # real/control_node.py and real/line_follower_node.py had for the real
+    # robot until 2026-07-31. That gap is fixed as of this same commit
+    # (mujoco_line_follower_node.py now declares and reads all three), so
+    # these keys are live for the first time.
+    #
+    # Verified via the Python API (Turtlebot3LineFollowerEnv, no ROS),
+    # simple track, 6 s / 120 steps from reset, one run each -- not a swept
+    # comparison, but isolated so the two changes below don't get credited to
+    # each other:
+    #
+    #                                            peak wheel cmd   final lateral_error
+    #   old ctrl,  old governor (-0.9/0.1)            18.08              -0.064
+    #   NEW ctrl,  old governor (-0.9/0.1)              4.17              +0.009
+    #   old ctrl,  NEW governor (-0.5/0.35)            18.10              +0.004
+    #
+    # The controller retuning alone reproduces essentially the whole effect
+    # (4.17 vs the combined run's 4.24); the governor alone reproduces
+    # essentially the unmodified baseline (18.10 vs 18.08). That is why the
+    # curve_* governor parameters below are exposed but left at
+    # CurveSpeedGovernorConfig's own defaults (-0.9/0.1), not ported --
+    # unlike the real robot, MuJoCo's heading_error is clean (rendered, no
+    # camera noise), which is what the real robot's governor retuning was
+    # compensating for; here it has nothing to compensate.
+    #
+    # peak_wheel 18.08 is against a 20.0 max_wheel_speed ceiling -- the old
+    # defaults were riding close to saturation the whole 6 s, matching the
+    # same saturation-driven instability the real robot hit at these same
+    # numbers on 2026-07-31/2026-08-04. NOT verified: longer runs, repeat
+    # runs (this session learned single-run measurements aren't reliable for
+    # anything but the grossest differences), or found_rate over a full lap.
+    kp: 1.2
+    ki: 0.1
+    kd: 0.05
     n_filter: 20.0
+    steering_sign: -1.0
+    base_speed_scale: 0.007
+    max_angular_speed: 1.4
 
     # Camera-local path generator (LocalPath_* in the model workspace).
     # 2026-08-04: back to the 0.50/0.20 pair. The 0.30/0.40 pair it replaces
