@@ -182,7 +182,170 @@
     # positives came from (the Otsu gate above should now reject them, but
     # that pairing has not been driven). Change roi and lookahead together --
     # a 0.30 lookahead inside a 0.3 ROI would be pure extrapolation.
-    roi_bottom_fraction: 0.3
+    #
+    # 2026-08-11 (later the same day): THE COST OF roi 0.6 WAS NOT THE ROI.
+    # roi 0.6 was tried live and dropped /line_follower/local_path from
+    # 20.0 Hz to 9.23 Hz, which is why the value below is still 0.3. Profiling
+    # LineFollowerVision.step() per stage on 150 live frames found the whole
+    # frame-rate question is one stage: _hough_seed is 83% of the pass at
+    # EVERY ROI depth (24.7 ms of 29.8 at roi 0.3, 45.2 of 53.3 at 0.6 -- this
+    # PC, so relative only). probabilistic_hough_line costs time per LIT MASK
+    # PIXEL, and this track's path is ~275-357 px wide on a 640 px frame, so
+    # the mask handed to it covers 44-49% of the ROI. OpenCV's own HoughLinesP
+    # on the same filled mask is barely faster (38.7 vs 44.0 ms), which is what
+    # shows the cost is the point count and not the implementation.
+    #
+    # Transport was ruled out as an explanation, two ways. (1) Arithmetic: a
+    # per-frame cost that does not depend on ROI cannot produce a bigger
+    # roi-0.3-to-0.6 ratio, it produces a smaller one, and at roi 0.3 the Pi
+    # appeared to hold exactly 20.0 Hz, so transport AND vision together
+    # already fitted inside 50 ms there. (That 20.0 Hz reading turned out to
+    # be the camera CEILING rather than a throughput result -- see the
+    # on-robot block below -- but the conclusion survives, because a
+    # ROI-independent cost still cannot explain a ratio that grows with ROI,
+    # and the direct measurement in (2) settles it anyway.)
+    # (2) Measured: a 640x480x3
+    # sensor_msgs/Image between two Python processes costs 0.385 ms to
+    # serialise, 0.284 ms to deserialise, and 0.040 ms for the node's
+    # _image_msg_to_rgb. Note also that loading the vision node into
+    # camera_container is not available regardless -- rclpy has no composable
+    # node support (there is no rclpy_components; rclcpp_components containers
+    # take C++ plugins only), so that would mean a C++ rewrite.
+    #
+    # vision.py now has a seed_mode parameter for this. seed_mode "hough" is
+    # the default and is bit-identical to every previous release (verified: 0
+    # found mismatches and max |delta| exactly 0.000e+00 on steering / lateral
+    # / heading / confidence over 2692 frames -- 150 live stationary plus 1196
+    # of the 2026-07-31 driven lap, at both roi 0.3 and 0.6). seed_mode
+    # "run_midpoint" reads the seed straight off the mask instead:
+    #
+    #   roi  seed_mode      ms/frame  heading sd  base_col sd  near_px_err sd
+    #   0.3  hough             28.6      0.5432       189.3         133.7
+    #   0.3  run_midpoint       4.0      0.3180         1.4          33.3
+    #   0.6  hough             54.1      0.0518       106.3          65.9
+    #   0.6  run_midpoint       5.0      0.0295         1.3          28.2
+    #
+    # ^^ THOSE TWO hough ROWS ARE PC NUMBERS AND THE ROBOT DOES NOT REPRODUCE
+    # THEM. Replaying the same 120 frames through the same code on the Pi and
+    # on this PC agrees on only 7/120 frames at roi 0.3 and 38/120 at roi 0.6
+    # (max |delta| heading 0.98 / 1.05). Both machines are deterministic
+    # within a process, and the masks are provably identical -- "run_midpoint"
+    # depends only on the mask and is bit-identical 120/120 at four ROI depths
+    # -- so the divergence is inside _hough_seed. skimage 0.22.0 on the Pi
+    # against 0.26.0 here is the leading explanation, not isolated by
+    # downgrading. The "run_midpoint" rows transfer exactly; treat every
+    # offline-PC "hough" figure as PC-only.
+    #
+    # The defect is real on both machines but has a DIFFERENT SIGNATURE on
+    # each, and the robot's is the one that matters. On the PC the seed jitters
+    # (base_col sd 106-189 px on one repeated picture). On the Pi it barely
+    # jitters at all (sd 9-14 px) and is instead systematically WRONG: with the
+    # mask's path spanning columns 216-595, midpoint 405.5, the Hough seed sits
+    # at 593-596 -- locked onto the path's right-hand EDGE, ~176 px off centre,
+    # which at error_scale 500 is about 0.35 of lateral_error. Live on the Pi
+    # that shows up as lateral mean +0.181 (hough) against +0.068
+    # (run_midpoint) at roi 0.3. Same root cause either way, and exactly what
+    # _hough_seed's own docstring warns about: on a path this wide both long
+    # edges qualify as the dominant segment.
+    #
+    # It then propagates: the +/-search_radius gate truncates a path wider than
+    # the gate on 53-73% of frames, so _find_nearest_run returns a slice
+    # centred on wherever the seed landed rather than the path, and
+    # corr(first window midpoint, seed) is 0.96 / 0.89. With the Hough seed
+    # removed that correlation falls to 0.20 / 0.14 and gate truncation to
+    # 31% / 5%. This is the same defect as the heading_error conditioning
+    # problem above, seen from the other end.
+    #
+    # So the ROI-depth trade this comment block was written around is no
+    # longer a trade: at seed_mode "run_midpoint", roi 0.6 costs 5.0 ms/frame
+    # against 27.6 ms for the SHIPPED roi 0.3 today -- 5.5x cheaper than the
+    # setting it would replace. Deliberate behaviour change, quantified: over
+    # the driven lap it matches "hough" exactly on 94% of frames (roi 0.6),
+    # max |delta| 0.074 steering / 0.154 heading, 0 found-flag mismatches.
+    #
+    # ON THE ROBOT, 2026-08-11, USB-C powered (throttled=0x0, ARM 1.5 GHz),
+    # stationary on a straight with the lights off, rate measured by
+    # ros2 topic hz ON the Pi over ~500 samples per cell:
+    #
+    #   roi   lookahead  seed_mode     rate Hz  heading sd  lateral mean
+    #   0.30  0.20       hough (SHIP)   14.65     0.2111       +0.1809
+    #   0.30  0.20       run_midpoint   20.006    0.4474       +0.0675
+    #   0.60  0.30       hough           9.90     0.1346       +0.1077
+    #   0.60  0.30       run_midpoint   20.010    0.1481       +0.0925
+    #   0.65  0.30       run_midpoint   20.079    0.1089       +0.0829
+    #
+    # run_midpoint pins 20 Hz at EVERY depth including 0.65, where step() is
+    # 21.3 ms against a 50 ms budget -- not a marginal pass. So roi 0.6 +
+    # run_midpoint beats the shipping config on BOTH axes at once (20.01 Hz
+    # and 0.148 against 14.65 Hz and 0.211), which the trade this block was
+    # written around said was impossible.
+    #
+    # Two readings in this file's earlier entries do not survive that session:
+    #  - "roi 0.3 -> 20.0 Hz" was the CAMERA CEILING, not throughput. The
+    #    driver pins frame_duration 50000, i.e. exactly 20.000 Hz, so no
+    #    configuration can exceed it and 20.0 Hz never measured headroom.
+    #    Re-measured today the same config gives 14.65-15.44 Hz; the old
+    #    20.0 Hz did not reproduce, most likely a brighter scene (PPHT cost
+    #    scales with lit mask pixels) -- not isolated.
+    #  - run_midpoint is NOT uniformly better on heading. At roi 0.3 it is
+    #    worse (0.4474 against 0.2111), because hough's smoothness there is
+    #    partly self-reference: its window measures a 17 px fragment of a
+    #    380 px path and corr(window, seed) is 0.64. The gain is at depth.
+    #
+    # NOT DRIVEN, IN EITHER MODE. Everything above is stationary, one pose,
+    # one straight section, lights off. It says the signal is fresher and less
+    # biased, not that the robot drives better. seed_mode is deliberately NOT
+    # set in this file, so nothing changes until someone measures it moving.
+    #
+    # READ THIS BEFORE THE FIRST DRIVEN RUN WITH run_midpoint: switching the
+    # seed MOVES THE LATERAL SETPOINT, from the path's right edge to its
+    # centre, by ~176 px / ~0.35 of lateral_error. Every gain in this file was
+    # tuned against the edge-following signal. The first driven run after the
+    # switch is a RE-BASELINE, not a comparison -- the six runs of 2026-08-10
+    # are not valid controls for it. Untested at track crossings and on
+    # curves, where a deeper ROI also pulls in more of the room; that is the
+    # main new risk. To try it:
+    #   ros2 run simple_camera_pid line_follower_vision_node --ros-args \
+    #     --params-file <this file> \
+    #     -p roi_bottom_fraction:=0.6 -p lookahead_distance:=0.30 \
+    #     -p seed_mode:=run_midpoint
+    # and check the published rate is back at 20 Hz before scoring anything.
+    # Reproduce the table with:
+    #   python3 tools/diagnose_vision_geometry.py seed --roi 0.6 --lookahead 0.30 \
+    #     --frames ~/桌面/tuning_20260810/vision_profiling_20260811/stationary_150frames_roi06_live.npz
+    # 2026-08-11 EVENING -- TUNED ON THE ROBOT, and these three now ship
+    # together. seed_mode "run_midpoint" is what makes the rest possible: it
+    # removes the Hough seed, which was 83% of the vision pass AND the largest
+    # error source, so a deeper ROI no longer costs frame rate. Measured on
+    # the Pi, all cells 20.0 Hz and found_rate 1.000, robot driven at
+    # 0.075 m/s on one track from one start pose (first 10 s discarded):
+    #
+    #   roi  lookahead  steer RMS  lat RMS  angular |max|
+    #   0.6  0.30         0.098     0.086      0.718
+    #   0.6  0.20         0.083     0.054      0.486
+    #   0.4  0.20         0.094     0.056      0.875
+    #
+    # Shorter lookahead won on every axis: heading_error is a SLOPE that
+    # clamps at +/-1.0, and on an arc it reads about lookahead/radius, so a
+    # 0.30 m lookahead saturates on anything tighter than a 0.30 m radius
+    # while 0.20 m holds down to 0.20 m. Saturating costs twice -- the
+    # heading term stops responding AND the curve governor reads maximum
+    # severity and floors the speed.
+    #
+    # roi 0.4 is the OPERATOR'S CHOICE, recorded honestly: on the measurement
+    # above it matches roi 0.6 on lateral RMS (0.056 vs 0.054, inside the
+    # 2-5% run-to-run spread) but is worse on steering RMS and, the real
+    # difference, needs a much larger peak turn (0.875 vs 0.486 against the
+    # then-1.0 ceiling). The mechanism is the one this file documents further
+    # up: a shallower ROI is a shorter fit baseline, so heading_error is
+    # noisier and the controller works harder. roi 0.6 is the better-measured
+    # value; 0.4 ships because it was asked for, and max_angular_speed below
+    # was raised to give it the headroom it needs.
+    roi_bottom_fraction: 0.4
+    # "hough" (previous default) or "run_midpoint". See vision.py's seed_mode
+    # docstring and the block above; "hough" remains bit-identical to every
+    # release before 2026-08-11 and is kept for that comparison.
+    seed_mode: run_midpoint
     num_points: 30
     lookahead_distance: 0.20
     lateral_gain: 0.6
@@ -339,9 +502,53 @@
     # NOT established: whether some small kd (0.05-0.15) beats 0. That range
     # was never run -- the session ended first. 0.0 is the best MEASURED
     # value, not a proven optimum.
-    kp: 0.7
-    ki: 0.0
-    kd: 0.0
+    # 2026-08-11 EVENING: kp 0.7 -> 1.2, ki 0.0 -> 0.1, kd 0.0 -> 0.05.
+    # Tuned after the vision fixes above, i.e. against a 20 Hz feed whose
+    # steering_error has a stationary sd of 0.013 rather than 0.091. Every
+    # gain conclusion recorded ABOVE this line was measured on the old signal
+    # and does not carry over -- including the morning's own kd result.
+    #
+    # The order things were established, all on the robot, 60 s runs, first
+    # 10 s discarded, found_rate 1.000 and zero line losses throughout:
+    #
+    #   step                          steer RMS  lat RMS  lat bias  v (m/s)
+    #   kp 0.7, governor -0.9/0.1       0.137     0.127    +0.121    0.028
+    #   + governor -0.5/0.35            0.219     0.184    +0.174    0.043
+    #   + kp 1.2                        0.131     0.123    +0.113    0.043
+    #   + ki 0.05                       0.084     0.076    +0.044    0.045
+    #   + ki 0.1                        0.068     0.061    +0.024    0.045
+    #   + kd 0.05                       0.039     0.032    +0.013    0.047
+    #
+    # ki: the operator asked for it twice and was right both times. The
+    # argument against it in this file's earlier entry -- that the offset was
+    # probably an uncalibrated camera_yaw/roll and that ki would drive the
+    # robot physically off-centre to null a sensor artefact -- was tested and
+    # is WRONG. Three independent checks: static readings with the robot on
+    # the line average +0.022 (no large fixed bias); the operator observed the
+    # left wheel riding the line, which is the +0.113 reading made visible;
+    # and running the SAME track in REVERSE flipped both biases (heading
+    # +0.487 -> -0.514, lateral +0.024 -> -0.020) at nearly equal magnitude,
+    # which a mount bias cannot do. It is an ordinary steady-state tracking
+    # error of a proportional controller on a continuously curving path. That
+    # reverse run also closes the camera_roll_deg/camera_yaw_deg question
+    # left open on 2026-08-07: they are near zero and need no calibration.
+    #
+    # kd: harmful at 0.35 and 1.0 in the morning, useful at 0.05 in the
+    # evening. Not a contradiction -- the morning measured it with vision at
+    # 9-15 Hz feeding a 20 Hz loop (67% of ticks saw an unchanged input, so
+    # the derivative saw a staircase) and with a steady-state offset
+    # dominating the error. At 20 Hz with ki removing the offset, what is
+    # left is dynamic error, which is what a derivative is for. 0.05 and 0.1
+    # give identical accuracy (steer RMS 0.040 vs 0.041) but 0.1 pushes the
+    # peak turn to 0.930 against 0.716, so 0.05 is the knee. The lesson worth
+    # keeping: kd's value here is set by what ki and the sample rate are
+    # doing, and judging it in isolation produced the wrong answer twice.
+    #
+    # Repeatability, finally good enough to quote: two runs of kp 1.2 / ki 0.1
+    # / kd 0.05 agreed within 5% on every column except sign-flips/sec.
+    kp: 1.2
+    ki: 0.1
+    kd: 0.05
     n_filter: 20.0
 
     # base_linear_speed/base_speed_scale/max_angular_speed were NOT exposed
@@ -357,9 +564,42 @@
     # node's linear_speed default on this same robot) -- still just a
     # starting point, re-tune from an actual run's data like everything else
     # here, not a validated final value.
+    # 2026-08-11 EVENING: base_speed_scale 0.003 -> 0.007, max_angular_speed
+    # 1.0 -> 1.4.
+    #
+    # A speed sweep at the tuned gains established where the PID baseline's
+    # envelope actually is, which matters because it is the control the
+    # residual-RL work has to beat:
+    #
+    #   base_speed_scale  v (m/s)  lat RMS  steer RMS  found  losses  ang |max|
+    #   0.005             0.075     0.054     0.083    1.000    0       0.486
+    #   0.007             0.107     0.077     0.148    1.000    0       0.978
+    #   0.009             0.140     0.133     0.243    0.991    2       1.024
+    #
+    # 0.007 is the recommended operating point. Below it error grows linearly
+    # with speed (+43% speed, +43% error); above it the growth turns
+    # superlinear (+31% speed, +73% error) and the first line losses on a
+    # non-crossing track appear.
+    #
+    # What limits it is worth stating precisely, because two obvious
+    # explanations were tested and ruled out. It is NOT perception: found_rate
+    # is 1.000 with zero losses at 0.107 m/s. It is NOT actuator saturation:
+    # raising max_angular_speed from 1.0 to 1.4 removed the clipping (peak
+    # demand 0.978) and changed accuracy by nothing measurable (lat RMS 0.077
+    # -> 0.078). The residual is the control law's own structure -- a fixed
+    # -gain PID has no way to anticipate, and the loop's phase lag turns into
+    # cross-track error at speed.
+    #
+    # max_angular_speed 1.4 therefore ships NOT for accuracy -- it bought
+    # none -- but for headroom, and specifically for roi 0.4, whose noisier
+    # heading makes the controller work harder (peak 0.875 at 0.075 m/s where
+    # roi 0.6 needed 0.486). At 0.140 m/s the demand reached 1.024, i.e. the
+    # old 1.0 ceiling does bind at this ROI. Revert to 1.0 if any
+    # spin-in-place recurs -- that incident is why it was 1.0, and 1.4 has
+    # only been driven at these gains.
     base_linear_speed: 20.0
-    base_speed_scale: 0.003
-    max_angular_speed: 1.0
+    base_speed_scale: 0.007
+    max_angular_speed: 1.4
 
     # Curve_Speed_Governor. Exposed as parameters 2026-08-10 -- until then
     # the real nodes built CurveSpeedGovernorConfig() from its bare dataclass
@@ -407,11 +647,34 @@
     # governor exists for a reason, so raising these risks overshooting
     # curves -- change them one step at a time and watch found_rate, which
     # was 1.000 at kp 0.7 / kd 0 and is the thing that would break first.
+    # 2026-08-11 EVENING: slowdown_gain -0.9 -> -0.5, min_speed_scale
+    # 0.1 -> 0.35. Retuned only AFTER the ROI/seed fixes made heading_error a
+    # trustworthy input -- doing it earlier would have been fitting to noise,
+    # which is what the block above says and still means.
+    #
+    # Measured on the robot at kp 1.2 / kd 0 / ki 0, 60 s, first 10 s dropped:
+    #
+    #                        v mean   v p10   stops/min  time <20mm/s
+    #   -0.9 / 0.1           0.028   0.0216      4.9         4.5%
+    #   -0.5 / 0.35          0.043   0.0380      0.0         0.0%
+    #
+    # The "moves in fits and starts, crawls through curves" behaviour the
+    # operator reported disappeared completely: not one excursion below
+    # 10 mm/s in 49 s, against 16-22 per minute at the shipped values earlier
+    # that day. found_rate stayed 1.000 with zero losses, which was the risk
+    # -- more speed through curves is exactly where the vision would fail
+    # first if it were going to.
+    #
+    # heading_weight stays 1.0 and is now the dominant term by design: with a
+    # well-tracked lateral error (~0.05) it always beats
+    # lateral_weight * lateral. That is only sound because heading_error is
+    # now conditioned well enough to carry that weight -- stationary sd 0.0097
+    # against 0.337 before the ROI/seed work.
     curve_heading_weight: 1.0
     curve_lateral_weight: 0.8
-    curve_slowdown_gain: -0.9
+    curve_slowdown_gain: -0.5
     curve_slowdown_bias: 1.0
-    curve_min_speed_scale: 0.1
+    curve_min_speed_scale: 0.35
     curve_max_speed_scale: 1.0
 
     # --- Safety layer + lost-line recovery (ported from MATLAB 2026-08-09).

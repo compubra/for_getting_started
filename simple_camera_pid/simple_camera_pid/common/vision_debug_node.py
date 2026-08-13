@@ -177,6 +177,7 @@ class VisionDebugNode(Node):
                 "adaptive_brightness_fraction").value,
             roi_widen_step=self.get_parameter("roi_widen_step").value,
             roi_widen_max=self.get_parameter("roi_widen_max").value,
+            seed_mode=self.get_parameter("seed_mode").value,
             image_height=self.get_parameter("image_height").value,
             image_width=self.get_parameter("image_width").value,
             camera=self.camera,
@@ -235,6 +236,14 @@ class VisionDebugNode(Node):
         self.declare_parameter("adaptive_brightness_fraction", 0.0)
         self.declare_parameter("roi_widen_step", 0.2)
         self.declare_parameter("roi_widen_max", 0.7)
+        # "hough" (default) keeps the MATLAB-derived Hough seed and is
+        # bit-identical to every previous release; "run_midpoint" replaces it
+        # with a seed read straight off the mask. See LineFollowerVision's
+        # seed_mode docstring -- the Hough seed is 83% of the vision pass on
+        # this robot and its base_col wanders 106-189 px on a stationary
+        # scene whose mask centre is steady to under 1 px. Not yet driven in
+        # either mode.
+        self.declare_parameter("seed_mode", "hough")
         # JPEG quality for the .../compressed sibling topic (1-100, higher =
         # bigger/better). 80 is a reasonable default for a debug overlay
         # that's mostly flat color regions (ROI tint, boxes, text) plus a
